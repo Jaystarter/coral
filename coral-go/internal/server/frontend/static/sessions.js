@@ -10,7 +10,7 @@ import { loadSessionNotes, switchHistoryTab } from './notes.js';
 import { loadSessionTags } from './tags.js';
 import { loadSessionCommits } from './commits.js';
 import { loadAgentTasks, loadBoardTasks, renderTaskList } from './tasks.js';
-import { loadChangedFiles, refreshChangedFiles } from './changed_files.js';
+import { loadChangedFiles, refreshChangedFiles, renderTextWithLocalFileLinks } from './changed_files.js';
 import { loadAgentNotes } from './agent_notes.js';
 import { loadAgentEvents, switchAgenticTab } from './agentic_state.js';
 import { loadHistoryEvents, loadHistoryTasks, loadHistoryAgentNotes } from './history_tabs.js';
@@ -68,7 +68,14 @@ export async function selectLiveSession(name, agentType, sessionId) {
     if (termLabel) termLabel.textContent = `${displayName || name} -- ${sessionId || ''}`;
     const termDot = document.getElementById("terminal-status-dot");
     if (termDot && agentData) {
-        termDot.className = `terminal-status-dot ${agentData.working ? 'working' : agentData.waiting_for_input ? 'waiting' : agentData.sleeping ? 'sleeping' : 'stale'}`;
+        const provider = (agentData.agent_type || agentType || "claude").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+        const recentlyActiveCodex = provider === "codex" && Number.isFinite(Number(agentData.staleness_seconds)) && Number(agentData.staleness_seconds) < 30;
+        const statusClass = agentData.done || agentData.sleeping ? "disabled"
+            : agentData.waiting_for_input ? "waiting"
+            : agentData.stuck ? "stuck"
+            : agentData.working || recentlyActiveCodex ? "working"
+            : "idle";
+        termDot.className = `terminal-status-dot ${statusClass} provider-${provider}`;
     }
     const badge = document.getElementById("session-type-badge");
     badge.textContent = agentType || "claude";
@@ -100,7 +107,8 @@ export async function selectLiveSession(name, agentType, sessionId) {
     // Fetch full detail in background (non-blocking) for pane capture
     loadLiveSessionDetail(name, agentType, sessionId).then(detail => {
         if (detail && detail.pane_capture) {
-            document.getElementById("pane-capture").textContent = detail.pane_capture;
+            const paneCapture = document.getElementById("pane-capture");
+            if (paneCapture) paneCapture.innerHTML = renderTextWithLocalFileLinks(detail.pane_capture);
         }
     });
 

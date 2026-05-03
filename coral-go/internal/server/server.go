@@ -99,11 +99,11 @@ func New(cfg *config.Config, db *store.DB, backend ptymanager.TerminalBackend, t
 	log.Printf("API Key: %s...", keyStore.Key()[:8])
 
 	s := &Server{
-		cfg:        cfg,
-		db:         db,
-		boardStore: boardStore,
-		backend:    backend,
-		terminal:   terminal,
+		cfg:           cfg,
+		db:            db,
+		boardStore:    boardStore,
+		backend:       backend,
+		terminal:      terminal,
 		licenseMgr:    licenseMgr,
 		launchCounter: launchCounter,
 		keyStore:      keyStore,
@@ -280,6 +280,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// ── API Routes ──────────────────────────────────────────────
 	sessHandler := routes.NewSessionsHandler(s.db, s.cfg, s.backend, s.terminal, s.boardStore)
+	localFilesHandler := routes.NewLocalFilesHandler(s.cfg)
 	sysHandler := routes.NewSystemHandler(s.db, s.cfg)
 	s.systemHandler = sysHandler
 	histHandler := routes.NewHistoryHandler(s.db, s.cfg, s.boardStore)
@@ -322,6 +323,9 @@ func (s *Server) buildRouter() chi.Router {
 	r.Post("/api/sessions/launch-team", sessHandler.LaunchTeam)
 	r.Post("/api/sessions/live/team/{boardName}/kill", sessHandler.KillTeam)
 	r.Post("/api/sessions/live/team/{boardName}/reset", sessHandler.ResetTeam)
+
+	// Read-only local file previews for terminal-linked artifacts.
+	r.Get("/api/files/local-preview", localFilesHandler.Preview)
 
 	// Bulk sleep/wake all (must be registered before {name} routes to avoid conflicts)
 	r.Post("/api/sessions/live/sleep-all", sessHandler.SleepAll)

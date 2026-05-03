@@ -1,12 +1,119 @@
 /* Changed files panel — load and render per-agent file diffs */
 
 import { state } from './state.js';
-import { escapeHtml, showToast } from './utils.js';
+import { escapeAttr, escapeHtml, showToast } from './utils.js';
 import { fetchFileList, fuzzyFilter, fetchDirEntries, getDirBrowseResults } from './file_mention.js';
 
 let _currentFiles = [];
 let _searchTimeout = null;
 let _renderTimer = null;
+
+const LOCAL_PREVIEW_EXTENSIONS = [
+    'bash', 'c', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html',
+    'java', 'js', 'json', 'jsonl', 'jsx', 'kt', 'log', 'md', 'ndjson',
+    'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'swift', 'toml', 'ts', 'tsx',
+    'tsv', 'txt', 'xml', 'yaml', 'yml', 'zsh',
+];
+const LOCAL_PREVIEW_EXT_PATTERN = LOCAL_PREVIEW_EXTENSIONS.join('|');
+
+function _localPreviewPathRegex() {
+    return new RegExp(`(^|[\\s([{"'\`])((?:~/|/)[^\\n\\r"'<>]+?\\.(?:${LOCAL_PREVIEW_EXT_PATTERN}))(?=$|[\\s),.;:\\]\\}])`, 'gi');
+}
+
+export function extractLocalPreviewLinks(text) {
+    const links = [];
+    const re = _localPreviewPathRegex();
+    let match;
+    while ((match = re.exec(text || ''))) {
+        const prefix = match[1] || '';
+        const filepath = match[2];
+        const start = match.index + prefix.length;
+        links.push({ filepath, start, end: start + filepath.length });
+    }
+    return links;
+}
+
+function _isLikelyLocalPreviewPath(value) {
+    const trimmed = (value || '').trim();
+    if (!trimmed || !(trimmed.startsWith('/') || trimmed.startsWith('~/'))) return false;
+    return extractLocalPreviewLinks(trimmed).some(link => link.filepath === trimmed);
+}
+
+export function renderTextWithLocalFileLinks(text) {
+    const raw = text || '';
+    const links = extractLocalPreviewLinks(raw);
+    if (links.length === 0) return escapeHtml(raw);
+
+    let html = '';
+    let last = 0;
+    links.forEach(({ filepath, start, end }) => {
+        html += escapeHtml(raw.slice(last, start));
+        html += `<button type="button" class="local-file-link" data-local-file-path="${escapeAttr(filepath)}">${escapeHtml(filepath)}</button>`;
+        last = end;
+    });
+    html += escapeHtml(raw.slice(last));
+    return html;
+}
+
+export function renderHtmlWithLocalFileLinks(html) {
+    if (!html || !extractLocalPreviewLinks(html).length) return html || '';
+
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const walker = document.createTreeWalker(
+        template.content,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode(node) {
+                const parent = node.parentElement;
+                if (!parent || parent.closest('a, button, script, style, textarea')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return extractLocalPreviewLinks(node.nodeValue).length
+                    ? NodeFilter.FILTER_ACCEPT
+                    : NodeFilter.FILTER_REJECT;
+            },
+        },
+    );
+
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+
+    for (const node of nodes) {
+        const raw = node.nodeValue || '';
+        const links = extractLocalPreviewLinks(raw);
+        if (!links.length) continue;
+
+        const fragment = document.createDocumentFragment();
+        let last = 0;
+        for (const { filepath, start, end } of links) {
+            if (start > last) {
+                fragment.appendChild(document.createTextNode(raw.slice(last, start)));
+            }
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'local-file-link local-file-link-chat';
+            button.dataset.localFilePath = filepath;
+            button.title = 'Preview local file';
+            button.textContent = filepath;
+            fragment.appendChild(button);
+            last = end;
+        }
+        if (last < raw.length) {
+            fragment.appendChild(document.createTextNode(raw.slice(last)));
+        }
+        node.parentNode.replaceChild(fragment, node);
+    }
+
+    return template.innerHTML;
+}
+
+document.addEventListener('click', (event) => {
+    const target = event.target.closest?.('.local-file-link[data-local-file-path]');
+    if (!target) return;
+    event.preventDefault();
+    openLocalFilePreview(target.dataset.localFilePath);
+});
 
 /* ── Starred files (persisted in localStorage per session) ── */
 
@@ -102,7 +209,15 @@ export function toggleFileSearchMode() {
 }
 
 export async function searchRepoFiles(query) {
-    if (!query || !state.currentSession || state.currentSession.type !== 'live') {
+    if (!query) {
+        _hideSearchDropdown();
+        return;
+    }
+    if (_isLikelyLocalPreviewPath(query)) {
+        _renderLocalPathDropdown(query);
+        return;
+    }
+    if (!state.currentSession || state.currentSession.type !== 'live') {
         _hideSearchDropdown();
         return;
     }
@@ -120,6 +235,24 @@ export async function searchRepoFiles(query) {
         clearTimeout(_renderTimer);
         _renderTimer = setTimeout(() => _renderSearchDropdown(matches, query), 30);
     }
+}
+
+function _renderLocalPathDropdown(query) {
+    const dropdown = document.getElementById('files-search-dropdown');
+    if (!dropdown) return;
+
+    _searchResults = [{ path: query, type: 'local-file' }];
+    _searchSelectedIdx = 0;
+    dropdown.innerHTML = `<div class="file-mention-item selected" data-index="0">
+        <span class="material-icons local-file-result-icon">data_object</span>
+        <span>${escapeHtml(query)}</span>
+        <span class="local-file-result-kicker">Open local preview</span>
+    </div>`;
+    dropdown.style.display = 'block';
+    dropdown.querySelector('.file-mention-item')?.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        _selectSearchItem(0);
+    });
 }
 
 function _renderSearchDropdown(files, query) {
@@ -197,6 +330,9 @@ function _selectSearchItem(index) {
     } else if (item.type === 'create') {
         _hideSearchDropdown();
         window._createFile(item.path);
+    } else if (item.type === 'local-file') {
+        _hideSearchDropdown();
+        openLocalFilePreview(item.path);
     } else {
         _hideSearchDropdown();
         openFilePreview(item.path);
@@ -310,6 +446,10 @@ export function initTopBarSearch() {
             return;
         }
         debounce = setTimeout(async () => {
+            if (_isLikelyLocalPreviewPath(q)) {
+                _renderTopBarResults([{ path: q, type: 'local-file' }]);
+                return;
+            }
             if (!state.currentSession || state.currentSession.type !== 'live') {
                 _renderTopBarResults(null, 'Select an agent to search files');
                 return;
@@ -401,8 +541,17 @@ function _renderTopBarResults(files, message, workingDir) {
         dropdown.style.display = 'block';
         return;
     }
-    dropdown.innerHTML = dirHeader + files.slice(0, 20).map(fp => {
+    dropdown.innerHTML = dirHeader + files.slice(0, 20).map(item => {
+        const fp = typeof item === 'string' ? item : item.path;
+        const type = typeof item === 'string' ? 'repo-file' : item.type;
         const escaped = escapeHtml(fp).replace(/'/g, "\\'");
+        if (type === 'local-file') {
+            return `<div class="file-mention-item local-file-result" onmousedown="event.preventDefault(); openLocalFilePreview('${escaped}')">
+                <span class="material-icons local-file-result-icon">data_object</span>
+                <span>${escapeHtml(fp)}</span>
+                <span class="local-file-result-kicker">Open local preview</span>
+            </div>`;
+        }
         return `<div class="file-mention-item" onmousedown="event.preventDefault(); openFilePreview('${escaped}')">${escapeHtml(fp)}</div>`;
     }).join('');
     dropdown.style.display = 'block';
@@ -632,6 +781,95 @@ export function openFilePreview(filepath) {
 export function openFileEdit(filepath) {
     if (!state.currentSession || state.currentSession.type !== 'live') return;
     _openInlinePane(filepath, 'edit');
+}
+
+/** Preview an absolute local artifact linked from terminal output. */
+export async function openLocalFilePreview(filepath) {
+    if (!filepath) return;
+
+    const isMobile = window.innerWidth <= 767;
+    let panel;
+
+    if (isMobile) {
+        document.querySelectorAll('.mobile-file-preview-overlay').forEach(el => el.remove());
+        const overlay = document.createElement('div');
+        overlay.className = 'mobile-file-preview-overlay';
+        document.body.appendChild(overlay);
+        panel = overlay;
+    } else {
+        panel = document.getElementById('agentic-panel-files');
+        if (!panel) {
+            showToast('Files panel is not available', true);
+            return;
+        }
+        if (window.switchAgenticTab) window.switchAgenticTab('files', 'top');
+    }
+
+    const { name } = splitPath(filepath);
+    const gen = ++_previewGen;
+    _previewState = { filepath, mode: 'local-preview', content: '', rawContent: '', originalContent: null, hasDiff: false, gen };
+
+    panel.innerHTML = `
+        <div class="inline-preview-header local-preview-header">
+            <button class="inline-preview-back" onclick="window._closeInlinePreview()" title="Back to file list">
+                <span class="material-icons">arrow_back</span>
+            </button>
+            <span class="inline-preview-filepath" title="${escapeHtml(filepath)}">
+                <span class="local-preview-kicker">Local artifact</span>
+                ${escapeHtml(name || filepath)}
+            </span>
+            <div class="inline-preview-actions">
+                <button class="inline-preview-mode-btn local-preview-copy-contents" onclick="window._copyPreviewContents()" title="Copy all file contents">
+                    <span class="material-icons">content_copy</span>
+                    <span>Copy contents</span>
+                </button>
+                <button class="inline-preview-mode-btn" onclick="window._copyPreviewPath()" title="Copy path">
+                    <span class="material-icons">link</span>
+                </button>
+            </div>
+        </div>
+        <div class="inline-preview-body" id="inline-preview-body">
+            <div class="inline-preview-loading">Loading local preview...</div>
+        </div>
+        <div class="inline-preview-cm" id="inline-preview-cm" style="display:none"></div>
+    `;
+
+    const body = document.getElementById('inline-preview-body');
+    if (!body) return;
+
+    try {
+        const qs = new URLSearchParams({ path: filepath });
+        const resp = await fetch(`/api/files/local-preview?${qs}`);
+        const data = await resp.json().catch(() => ({}));
+
+        if (_isStale(gen)) return;
+
+        if (!resp.ok || data.error) {
+            body.innerHTML = `<div class="inline-preview-error">${escapeHtml(data.error || 'Failed to load local preview')}</div>`;
+            return;
+        }
+
+        const displayPath = data.filepath || filepath;
+        const rawContent = data.content || '';
+        const content = _formatLocalPreviewContent(rawContent, displayPath);
+        _previewState.filepath = displayPath;
+        _previewState.content = content;
+        _previewState.rawContent = rawContent;
+
+        _renderContentView(body, content, displayPath);
+    } catch (e) {
+        if (_isStale(gen)) return;
+        body.innerHTML = '<div class="inline-preview-error">Failed to load local preview</div>';
+    }
+}
+
+function _formatLocalPreviewContent(content, filepath) {
+    if (!/\.json$/i.test(filepath)) return content;
+    try {
+        return JSON.stringify(JSON.parse(content), null, 2);
+    } catch {
+        return content;
+    }
 }
 
 /** Create a new file via the API and open it in the editor. */
@@ -983,6 +1221,23 @@ window._savePreviewFile = async function() {
     } finally {
         if (saveBtn) saveBtn.disabled = false;
     }
+};
+
+window._copyPreviewPath = function() {
+    if (_previewState?.filepath) copyFilePath(_previewState.filepath);
+};
+
+window._copyPreviewContents = function() {
+    const content = _previewState?.rawContent ?? _previewState?.content ?? '';
+    if (!content) {
+        showToast('No file contents to copy', true);
+        return;
+    }
+    navigator.clipboard.writeText(content).then(() => {
+        showToast('File contents copied');
+    }).catch(() => {
+        showToast('Copy failed', true);
+    });
 };
 
 /** Close inline preview and restore the files list. */

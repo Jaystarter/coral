@@ -75,6 +75,25 @@ func TestLookupPricing_UnknownModel(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestLookupPricing_EmptyModel(t *testing.T) {
+	_, ok := lookupPricing("")
+	assert.False(t, ok)
+	assert.Equal(t, 0, LookupContextWindow(""))
+}
+
+func TestLookupPricing_GPT55(t *testing.T) {
+	p, ok := lookupPricing("gpt-5.5")
+	require.True(t, ok)
+	assert.InDelta(t, 5.00, p.InputPerMTok, 0.001)
+	assert.InDelta(t, 0.50, p.CacheReadPerMTok, 0.001)
+	assert.InDelta(t, 30.00, p.OutputPerMTok, 0.001)
+	assert.Equal(t, 1_050_000, p.ContextWindow)
+}
+
+func TestLookupContextWindow_OneMillionSuffix(t *testing.T) {
+	assert.Equal(t, 1_000_000, LookupContextWindow("us.anthropic.claude-opus-4-7[1m]"))
+}
+
 func TestLookupPricing_SingleSegmentNoMatch(t *testing.T) {
 	// A single matching segment should not be enough
 	_, ok := lookupPricing("claude")
@@ -125,9 +144,9 @@ func TestCalculateCostBreakdown_InputOnlyNoCacheTokens(t *testing.T) {
 	b := CalculateCostBreakdown("gpt-4o", usage)
 	require.True(t, b.PricingFound)
 	// gpt-4o: input $2.50/MTok, output $10.00/MTok
-	assert.InDelta(t, 1.25, b.InputCostUSD, 0.001)   // 500k * 2.50 / 1M
-	assert.InDelta(t, 1.00, b.OutputCostUSD, 0.001)   // 100k * 10.00 / 1M
-	assert.Equal(t, 0.0, b.CacheReadCostUSD)           // no cache pricing for OpenAI
+	assert.InDelta(t, 1.25, b.InputCostUSD, 0.001)  // 500k * 2.50 / 1M
+	assert.InDelta(t, 1.00, b.OutputCostUSD, 0.001) // 100k * 10.00 / 1M
+	assert.Equal(t, 0.0, b.CacheReadCostUSD)        // no cache pricing for OpenAI
 	assert.InDelta(t, 2.25, b.TotalCostUSD, 0.001)
 }
 
@@ -143,8 +162,8 @@ func TestCalculateCostBreakdown_OpusPricing(t *testing.T) {
 	b := CalculateCostBreakdown("claude-opus-4-20250514", usage)
 	require.True(t, b.PricingFound)
 	// opus: input $15/MTok, output $75/MTok
-	assert.InDelta(t, 1.50, b.InputCostUSD, 0.001)    // 100k * 15 / 1M
-	assert.InDelta(t, 3.75, b.OutputCostUSD, 0.001)   // 50k * 75 / 1M
+	assert.InDelta(t, 1.50, b.InputCostUSD, 0.001)  // 100k * 15 / 1M
+	assert.InDelta(t, 3.75, b.OutputCostUSD, 0.001) // 50k * 75 / 1M
 	assert.InDelta(t, 5.25, b.TotalCostUSD, 0.001)
 }
 

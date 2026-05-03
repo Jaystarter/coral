@@ -27,27 +27,27 @@ func GetCLIName(boardType string) string {
 
 // LaunchParams holds all parameters for building a launch command.
 type LaunchParams struct {
-	SessionID       string
-	SessionName     string // tmux session name (e.g. "claude-<uuid>"), used for CORAL_SESSION_NAME
-	ProtocolPath    string
-	ResumeSessionID string
-	Flags           []string
-	WorkingDir      string
-	BoardName       string
-	Role            string
-	Prompt          string
-	PromptOverrides map[string]string // user overrides for orchestrator/worker prompts
-	BoardType       string
-	Capabilities    *Capabilities
-	Tools           []string              // allowed tools (e.g. ["TodoWrite", "Bash(npm *)"])
-	MCPServers      map[string]any        // MCP server configs keyed by name
-	Hooks           map[string]interface{} // per-agent hooks to merge into settings (Claude-native) or fire via runner (Gemini/Codex)
-	CLIPath         string // custom path to agent binary (empty = default from PATH)
-	PermissionMode  string // --permission-mode value (empty or "default" means omit the flag)
-	ProxyBaseURL    string // proxy base URL (e.g. "http://127.0.0.1:8420/proxy/{session_id}")
-	UpstreamBaseURL string // detected upstream URL before proxy override (e.g. "https://api.anthropic.com")
-	UpstreamProvider string // detected upstream provider (e.g. "anthropic", "bedrock", "vertex", "openai")
-	CoralDir        string // path to coral data directory (~/.coral) for CA cert location
+	SessionID        string
+	SessionName      string // tmux session name (e.g. "claude-<uuid>"), used for CORAL_SESSION_NAME
+	ProtocolPath     string
+	ResumeSessionID  string
+	Flags            []string
+	WorkingDir       string
+	BoardName        string
+	Role             string
+	Prompt           string
+	PromptOverrides  map[string]string // user overrides for orchestrator/worker prompts
+	BoardType        string
+	Capabilities     *Capabilities
+	Tools            []string               // allowed tools (e.g. ["TodoWrite", "Bash(npm *)"])
+	MCPServers       map[string]any         // MCP server configs keyed by name
+	Hooks            map[string]interface{} // per-agent hooks to merge into settings (Claude-native) or fire via runner (Gemini/Codex)
+	CLIPath          string                 // custom path to agent binary (empty = default from PATH)
+	PermissionMode   string                 // --permission-mode value (empty or "default" means omit the flag)
+	ProxyBaseURL     string                 // proxy base URL (e.g. "http://127.0.0.1:8420/proxy/{session_id}")
+	UpstreamBaseURL  string                 // detected upstream URL before proxy override (e.g. "https://api.anthropic.com")
+	UpstreamProvider string                 // detected upstream provider (e.g. "anthropic", "bedrock", "vertex", "openai")
+	CoralDir         string                 // path to coral data directory (~/.coral) for CA cert location
 }
 
 // IndexedSession holds extracted session data from a history file.
@@ -57,7 +57,7 @@ type IndexedSession struct {
 	SourceFile     string  // path to the history file this session came from
 	FileMtime      float64 // Unix timestamp of file modification time
 	FirstTimestamp *string
-	LastTimestamp   *string
+	LastTimestamp  *string
 	MessageCount   int
 	DisplaySummary string
 	FTSBody        string
@@ -119,6 +119,30 @@ func GetAgent(agentType string) Agent {
 	}
 }
 
+// ConfiguredModel returns the model configured in the underlying agent CLI's
+// own settings when Coral has no per-agent default model set.
+func ConfiguredModel(agentType, workingDir string) string {
+	switch agentType {
+	case at.Codex:
+		return detectCodexModel()
+	case at.Claude:
+		return detectClaudeModel(workingDir)
+	default:
+		return ""
+	}
+}
+
+// ConfiguredContextWindow returns an explicit context window from the agent
+// CLI's own settings when one is available.
+func ConfiguredContextWindow(agentType, workingDir string) int {
+	switch agentType {
+	case at.Codex:
+		return detectCodexContextWindow()
+	default:
+		return 0
+	}
+}
+
 // CLIInfo holds the CLI binary name and install instructions for an agent type.
 type CLIInfo struct {
 	Binary         string `json:"binary"`
@@ -168,7 +192,7 @@ func readProtocolFile(path string) string {
 
 // shellQuote wraps a string in single quotes if it contains shell metacharacters
 // (e.g. [, ], *, ?, spaces) that zsh/bash would interpret. Single quotes inside
-// the string are escaped as '\''.
+// the string are escaped for POSIX shell syntax.
 func shellQuote(s string) string {
 	if s == "" {
 		return s
@@ -359,4 +383,3 @@ func BuildBoardActionPrompt(boardName, role, basePrompt string, promptOverrides 
 	}
 	return actionText
 }
-

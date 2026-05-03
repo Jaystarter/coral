@@ -1445,6 +1445,10 @@
     background: var(--bg-secondary);
 }
 
+.inline-preview-header.local-preview-header {
+    padding: 8px 10px;
+}
+
 .inline-preview-back {
     background: none;
     border: none;
@@ -1476,6 +1480,23 @@
     white-space: nowrap;
 }
 
+.local-preview-header .inline-preview-filepath {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    line-height: 1.2;
+}
+
+.local-preview-kicker,
+.local-file-result-kicker {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+
 .inline-preview-actions {
     display: flex;
     gap: 4px;
@@ -1505,6 +1526,18 @@
 }
 
 .inline-preview-mode-btn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.inline-preview-mode-btn.local-preview-copy-contents {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-primary);
+}
+
+.inline-preview-mode-btn.local-preview-copy-contents:hover {
     color: var(--accent);
     border-color: var(--accent);
 }
@@ -1557,6 +1590,45 @@
 
 .inline-preview-code code {
     font-family: inherit;
+}
+
+.local-file-link {
+    appearance: none;
+    border: 0;
+    border-bottom: 1px solid color-mix(in oklch, var(--accent) 48%, transparent);
+    border-radius: 0;
+    padding: 0 1px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+}
+
+.local-file-link:hover,
+.local-file-link:focus-visible {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
+    outline: none;
+}
+
+.chat-bubble .local-file-link-chat {
+    display: inline;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: left;
+}
+
+.file-mention-item .local-file-result-icon {
+    margin-right: 8px;
+    color: var(--accent);
+    font-size: 16px;
+    line-height: 1;
+    vertical-align: -3px;
+}
+
+.file-mention-item .local-file-result-kicker {
+    margin-left: auto;
+    padding-left: 10px;
 }
 
 /* CodeMirror editor container */

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,54 @@ func (a *CodexAgent) HistoryBasePath() string {
 }
 
 func (a *CodexAgent) HistoryGlobPattern() string { return "rollout-*.jsonl" }
+
+func detectCodexModel() string {
+	return readCodexConfigString("model")
+}
+
+func detectCodexContextWindow() int {
+	value := readCodexConfigString("model_context_window")
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func readCodexConfigString(key string) string {
+	home, _ := os.UserHomeDir()
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	f, err := os.Open(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") {
+			break
+		}
+		if idx := strings.IndexByte(line, '#'); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		name, raw, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		raw = strings.Trim(raw, `"'`)
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
 
 // ExtractSessions scans Codex history files under basePath and returns indexed sessions.
 // Files whose mtime matches knownMtimes are skipped.
@@ -124,7 +173,7 @@ func parseCodexSession(fpath string, mtime float64) (*IndexedSession, error) {
 		SourceFile:     fpath,
 		FileMtime:      mtime,
 		FirstTimestamp: firstTS,
-		LastTimestamp:   lastTS,
+		LastTimestamp:  lastTS,
 		MessageCount:   msgCount,
 		DisplaySummary: summary,
 	}, nil

@@ -2,15 +2,19 @@
 
 import { state } from './state.js';
 import { dbg } from './utils.js';
+import { extractLocalPreviewLinks, openLocalFilePreview } from './changed_files.js';
 
 let terminal = null;
 let fitAddon = null;
 let terminalWs = null;
 let _selectionDisposable = null;
+let _fileLinkProviderDisposable = null;
 let _onDataDisposable = null;
 let _onResizeDisposable = null;
 let _resizeObserver = null;
 let _terminalFocused = false;
+let _submittedCommandDecorations = [];
+let _fallbackSubmittedMarkerTimer = null;
 
 // Input queue: buffers keystrokes while WebSocket is disconnected
 let _inputQueue = [];
@@ -136,6 +140,7 @@ export function createTerminal(containerEl) {
     const scrollback = parseInt((state.settings || {}).terminal_scrollback, 10) || 20000;
     const fontSize = parseInt((state.settings || {}).terminal_font_size, 10) || 13;
     terminal = new Terminal({
+        allowProposedApi: true,
         cursorBlink: true,
         cursorStyle: 'block',
         disableStdin: false,
@@ -152,6 +157,7 @@ export function createTerminal(containerEl) {
         const webLinksAddon = new WebLinksAddon.WebLinksAddon();
         terminal.loadAddon(webLinksAddon);
     }
+    _registerLocalFileLinkProvider();
 
     _selectionDisposable = terminal.onSelectionChange(() => {
         state.isSelecting = terminal.hasSelection();
@@ -271,6 +277,110 @@ export function createTerminal(containerEl) {
     });
 
     return terminal;
+}
+
+function _registerLocalFileLinkProvider() {
+    if (!terminal || typeof terminal.registerLinkProvider !== 'function' || _fileLinkProviderDisposable) return;
+
+    _fileLinkProviderDisposable = terminal.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+            callback(_computeLocalFileLinks(bufferLineNumber));
+        },
+    });
+}
+
+function _computeLocalFileLinks(bufferLineNumber) {
+    if (!terminal?.buffer?.active) return [];
+
+    const { text, firstLineIndex } = _getWindowedTerminalLine(bufferLineNumber - 1);
+    const matches = extractLocalPreviewLinks(text);
+    if (matches.length === 0) return [];
+
+    const links = [];
+    for (const match of matches) {
+        const start = _mapStringIndexToBufferCell(firstLineIndex, 0, match.start);
+        const end = _mapStringIndexToBufferCell(start.lineIndex, start.cellIndex, match.end - match.start);
+        if (!start.valid || !end.valid) continue;
+        links.push({
+            text: match.filepath,
+            range: {
+                start: { x: start.cellIndex + 1, y: start.lineIndex + 1 },
+                end: { x: end.cellIndex, y: end.lineIndex + 1 },
+            },
+            activate: () => openLocalFilePreview(match.filepath),
+        });
+    }
+    return links;
+}
+
+function _getWindowedTerminalLine(lineIndex) {
+    const buffer = terminal.buffer.active;
+    const lines = [];
+    let firstLineIndex = lineIndex;
+    let line = buffer.getLine(lineIndex);
+    let collected = 0;
+
+    if (!line) return { text: '', firstLineIndex };
+
+    if (line.isWrapped && line.translateToString(true)[0] !== ' ') {
+        let probeIndex = lineIndex;
+        let probeLine;
+        const previous = [];
+        while ((probeLine = buffer.getLine(--probeIndex)) && collected < 2048) {
+            const value = probeLine.translateToString(true);
+            collected += value.length;
+            previous.push(value);
+            firstLineIndex = probeIndex;
+            if (!probeLine.isWrapped || value.includes(' ')) break;
+        }
+        previous.reverse();
+        lines.push(...previous);
+    }
+
+    lines.push(line.translateToString(true));
+
+    collected = 0;
+    let nextIndex = lineIndex;
+    let nextLine;
+    while ((nextLine = buffer.getLine(++nextIndex)) && nextLine.isWrapped && collected < 2048) {
+        const value = nextLine.translateToString(true);
+        collected += value.length;
+        lines.push(value);
+        if (value.includes(' ')) break;
+    }
+
+    return { text: lines.join(''), firstLineIndex };
+}
+
+function _mapStringIndexToBufferCell(lineIndex, cellIndex, remainingChars) {
+    const buffer = terminal.buffer.active;
+    const cell = buffer.getNullCell();
+    let col = cellIndex;
+
+    while (remainingChars > 0) {
+        const line = buffer.getLine(lineIndex);
+        if (!line) return { valid: false, lineIndex: -1, cellIndex: -1 };
+
+        for (let i = col; i < line.length; i++) {
+            line.getCell(i, cell);
+            const chars = cell.getChars();
+            if (cell.getWidth()) {
+                remainingChars -= chars.length || 1;
+                if (i === line.length - 1 && chars === '') {
+                    const nextLine = buffer.getLine(lineIndex + 1);
+                    if (nextLine && nextLine.isWrapped) {
+                        nextLine.getCell(0, cell);
+                        if (cell.getWidth() === 2) remainingChars += 1;
+                    }
+                }
+            }
+            if (remainingChars < 0) return { valid: true, lineIndex, cellIndex: i };
+        }
+        lineIndex++;
+        col = 0;
+    }
+
+    return { valid: true, lineIndex, cellIndex: col };
 }
 
 export function connectTerminalWs(name, agentType, sessionId) {
@@ -413,6 +523,10 @@ export function disposeTerminal() {
         _selectionDisposable.dispose();
         _selectionDisposable = null;
     }
+    if (_fileLinkProviderDisposable) {
+        _fileLinkProviderDisposable.dispose();
+        _fileLinkProviderDisposable = null;
+    }
     if (_onDataDisposable) {
         _onDataDisposable.dispose();
         _onDataDisposable = null;
@@ -456,6 +570,87 @@ export function focusTerminal() {
     if (terminal) {
         terminal.focus();
     }
+}
+
+export function markCommandSubmitted(command) {
+    const label = "YOU SENT";
+    if (!terminal) {
+        _showFallbackSubmittedMarker(label);
+        return;
+    }
+
+    const marker = typeof terminal.registerMarker === "function" ? terminal.registerMarker(0) : null;
+    if (!marker || typeof terminal.registerDecoration !== "function") {
+        _showFallbackSubmittedMarker(label);
+        return;
+    }
+
+    const lineCount = Math.max(1, Math.min(4, Math.ceil((String(command || "").length + 4) / Math.max(terminal.cols - 2, 1))));
+    let decoration;
+    try {
+        decoration = terminal.registerDecoration({
+            marker,
+            x: 0,
+            width: terminal.cols,
+            height: lineCount,
+            layer: "top",
+        });
+    } catch (e) {
+        console.warn("Failed to register submitted command decoration:", e);
+        _showFallbackSubmittedMarker(label);
+        return;
+    }
+
+    if (!decoration) {
+        _showFallbackSubmittedMarker(label);
+        return;
+    }
+
+    decoration.onRender((el) => {
+        el.classList.add("xterm-operator-send-marker");
+        el.setAttribute("aria-label", "Submitted by you");
+        el.dataset.operatorLabel = label;
+    });
+
+    const entry = { marker, decoration };
+    _submittedCommandDecorations.push(entry);
+    while (_submittedCommandDecorations.length > 6) {
+        _disposeSubmittedCommandDecoration(_submittedCommandDecorations.shift());
+    }
+
+    setTimeout(() => {
+        const index = _submittedCommandDecorations.indexOf(entry);
+        if (index !== -1) _submittedCommandDecorations.splice(index, 1);
+        _disposeSubmittedCommandDecoration(entry);
+    }, 18000);
+}
+
+function _disposeSubmittedCommandDecoration(entry) {
+    if (!entry) return;
+    try { entry.decoration?.dispose?.(); } catch (_) {}
+    try { entry.marker?.dispose?.(); } catch (_) {}
+}
+
+function _showFallbackSubmittedMarker(label) {
+    const container = document.getElementById("xterm-container");
+    if (!container) return;
+
+    let marker = container.querySelector(".xterm-operator-send-fallback");
+    if (!marker) {
+        marker = document.createElement("div");
+        marker.className = "xterm-operator-send-fallback";
+        marker.setAttribute("aria-label", "Submitted by you");
+        container.appendChild(marker);
+    }
+    marker.dataset.operatorLabel = label;
+    marker.classList.remove("is-visible");
+    void marker.offsetWidth;
+    marker.classList.add("is-visible");
+
+    clearTimeout(_fallbackSubmittedMarkerTimer);
+    _fallbackSubmittedMarkerTimer = setTimeout(() => {
+        marker.classList.remove("is-visible");
+    }, 18000);
 }
 
 /** Send raw terminal input data over the WebSocket (used by textarea integration). */

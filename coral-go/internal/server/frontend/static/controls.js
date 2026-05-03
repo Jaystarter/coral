@@ -5,6 +5,7 @@ import { escapeHtml, escapeAttr, showToast, showView } from './utils.js';
 import { stopCaptureRefresh } from './capture.js';
 import { renderLiveSessions } from './render.js';
 import { loadAgentEvents, renderEventTimeline } from './agentic_state.js';
+import { followLiveHistoryLatest } from './live_chat.js';
 
 // Lazy imports to avoid circular dependency (xterm_renderer imports controls)
 let _xtermModule = null;
@@ -15,6 +16,51 @@ async function _getXtermModule() {
 
 // Attached image paths (cleared on send)
 const pendingAttachments = [];
+let commandSentAckTimer = null;
+
+function _normalizeSubmittedMessage(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function rememberSubmittedMessage(command) {
+    const normalized = _normalizeSubmittedMessage(command);
+    if (!normalized) return;
+
+    const now = Date.now();
+    const entry = {
+        text: command,
+        normalized,
+        at: now,
+        session_id: state.currentSession?.session_id || "",
+    };
+
+    state.recentSubmittedMessages = [
+        entry,
+        ...(state.recentSubmittedMessages || []).filter(m => now - (m.at || 0) < 60000),
+    ].slice(0, 12);
+
+    window.dispatchEvent(new CustomEvent("coral:command-submitted", { detail: entry }));
+}
+
+function showCommandSentAck(command) {
+    rememberSubmittedMessage(command);
+    followLiveHistoryLatest({ smooth: true });
+
+    const editor = document.querySelector(".command-editor");
+    if (!editor) return;
+
+    editor.classList.remove("command-sent-ack");
+    // Restart the animation when rapid sends happen back-to-back.
+    void editor.offsetWidth;
+    editor.setAttribute("data-sent-label", "Submitted");
+    editor.classList.add("command-sent-ack");
+
+    clearTimeout(commandSentAckTimer);
+    commandSentAckTimer = setTimeout(() => {
+        editor.classList.remove("command-sent-ack");
+        editor.removeAttribute("data-sent-label");
+    }, 1050);
+}
 
 export async function sendCommand() {
     if (!state.currentSession || state.currentSession.type !== "live") {
@@ -39,12 +85,13 @@ export async function sendCommand() {
     if (pendingAttachments.length === 0) {
         const xterm = await _getXtermModule();
         if (xterm.sendTerminalInputWs(command)) {
+            xterm.markCommandSubmitted?.(command);
             // Send Enter after delay so bracket paste + tmux processing completes
             setTimeout(() => xterm.sendTerminalInputWs("\r"), 300);
             input.value = "";
             const key = sessionKey(state.currentSession);
             if (key) delete state.sessionInputText[key];
-            showToast(`Sent: ${command}`);
+            showCommandSentAck(command);
             xterm.focusTerminal();
             return;
         }
@@ -72,8 +119,11 @@ export async function sendCommand() {
             clearAttachments();
             const key = sessionKey(state.currentSession);
             if (key) delete state.sessionInputText[key];
-            showToast(`Sent: ${command}`);
-            _getXtermModule().then(m => m.focusTerminal());
+            showCommandSentAck(command);
+            _getXtermModule().then(m => {
+                m.markCommandSubmitted?.(command);
+                m.focusTerminal();
+            });
         }
     } catch (e) {
         showToast("Failed to send command", true);

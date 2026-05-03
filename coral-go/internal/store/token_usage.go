@@ -9,23 +9,23 @@ import (
 
 // TokenUsage represents a token usage snapshot for a session.
 type TokenUsage struct {
-	ID           int64   `db:"id" json:"id"`
-	SessionID    string  `db:"session_id" json:"session_id"`
-	AgentName    string  `db:"agent_name" json:"agent_name"`
-	AgentType    string  `db:"agent_type" json:"agent_type"`
-	TeamID       *int64  `db:"team_id" json:"team_id,omitempty"`
-	BoardName    *string `db:"board_name" json:"board_name,omitempty"`
-	InputTokens      int `db:"input_tokens" json:"input_tokens"`
-	OutputTokens     int `db:"output_tokens" json:"output_tokens"`
-	CacheReadTokens  int `db:"cache_read_tokens" json:"cache_read_tokens"`
-	CacheWriteTokens int `db:"cache_write_tokens" json:"cache_write_tokens"`
-	TotalTokens      int `db:"total_tokens" json:"total_tokens"`
-	CostUSD        float64 `db:"cost_usd" json:"cost_usd"`
-	NumTurns       int     `db:"num_turns" json:"num_turns"`
-	SessionStartAt string  `db:"session_start_at" json:"session_start_at,omitempty"`
-	LastActivityAt string  `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	RecordedAt     string  `db:"recorded_at" json:"recorded_at"`
-	Source         string  `db:"source" json:"source,omitempty"`
+	ID               int64   `db:"id" json:"id"`
+	SessionID        string  `db:"session_id" json:"session_id"`
+	AgentName        string  `db:"agent_name" json:"agent_name"`
+	AgentType        string  `db:"agent_type" json:"agent_type"`
+	TeamID           *int64  `db:"team_id" json:"team_id,omitempty"`
+	BoardName        *string `db:"board_name" json:"board_name,omitempty"`
+	InputTokens      int     `db:"input_tokens" json:"input_tokens"`
+	OutputTokens     int     `db:"output_tokens" json:"output_tokens"`
+	CacheReadTokens  int     `db:"cache_read_tokens" json:"cache_read_tokens"`
+	CacheWriteTokens int     `db:"cache_write_tokens" json:"cache_write_tokens"`
+	TotalTokens      int     `db:"total_tokens" json:"total_tokens"`
+	CostUSD          float64 `db:"cost_usd" json:"cost_usd"`
+	NumTurns         int     `db:"num_turns" json:"num_turns"`
+	SessionStartAt   string  `db:"session_start_at" json:"session_start_at,omitempty"`
+	LastActivityAt   string  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	RecordedAt       string  `db:"recorded_at" json:"recorded_at"`
+	Source           string  `db:"source" json:"source,omitempty"`
 }
 
 // UsageSummary represents aggregated token usage totals.
@@ -104,9 +104,25 @@ func (s *TokenUsageStore) RecordUsage(ctx context.Context, u *TokenUsage) error 
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO token_usage
+		`INSERT INTO token_usage
 		 (session_id, agent_name, agent_type, team_id, board_name, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, num_turns, session_start_at, last_activity_at, recorded_at, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(session_id, recorded_at) DO UPDATE SET
+		   agent_name = excluded.agent_name,
+		   agent_type = excluded.agent_type,
+		   team_id = excluded.team_id,
+		   board_name = excluded.board_name,
+		   input_tokens = excluded.input_tokens,
+		   output_tokens = excluded.output_tokens,
+		   cache_read_tokens = excluded.cache_read_tokens,
+		   cache_write_tokens = excluded.cache_write_tokens,
+		   total_tokens = excluded.total_tokens,
+		   cost_usd = excluded.cost_usd,
+		   num_turns = excluded.num_turns,
+		   session_start_at = excluded.session_start_at,
+		   last_activity_at = excluded.last_activity_at,
+		   source = excluded.source
+		 WHERE COALESCE(token_usage.source, 'jsonl') = 'jsonl' AND excluded.source = 'jsonl'`,
 		u.SessionID, u.AgentName, u.AgentType, u.TeamID, u.BoardName,
 		u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.TotalTokens, u.CostUSD, u.NumTurns, u.SessionStartAt, u.LastActivityAt, u.RecordedAt, u.Source)
 	if err != nil {

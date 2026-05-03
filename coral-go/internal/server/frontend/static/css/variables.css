@@ -11,42 +11,43 @@
 :root,
 [data-theme="dark"] {
     /* Surface / Background */
-    --bg-primary:   #0a0e14;
-    --bg-secondary: #12171e;
-    --bg-tertiary:  #1c2128;
-    --bg-hover:     #2a313a;
-    --bg-elevated:  #252b33;
+    --bg-primary:   oklch(14.5% 0.018 250);
+    --bg-secondary: oklch(18.5% 0.019 248);
+    --bg-tertiary:  oklch(23.5% 0.018 247);
+    --bg-hover:     oklch(29% 0.022 247);
+    --bg-elevated:  oklch(21.5% 0.020 248);
 
     /* Borders */
-    --border:       #30363d;
-    --border-light: #484f58;
+    --border:       color-mix(in oklch, var(--text-primary) 13%, transparent);
+    --border-light: color-mix(in oklch, var(--text-primary) 23%, transparent);
 
     /* Text */
-    --text-primary:   #e6edf3;
-    --text-secondary: #8b949e;
-    --text-muted:     #484f58;
+    --text-primary:   oklch(94.5% 0.012 78);
+    --text-secondary: oklch(72% 0.026 245);
+    --text-muted:     oklch(56% 0.025 245);
 
     /* Accent / Brand */
-    --accent:     #58a6ff;
-    --accent-dim: #1f6feb;
+    --accent:     oklch(74% 0.118 202);
+    --accent-dim: oklch(55.5% 0.105 205);
 
     /* Semantic Status */
-    --success: #3fb950;
-    --warning: #d29922;
-    --error:   #f85149;
+    --success: oklch(71% 0.116 168);
+    --warning: oklch(76% 0.124 78);
+    --error:   oklch(67% 0.170 27);
 
     /* Agent Badges */
-    --badge-claude: #7c3aed;
-    --badge-gemini: #2563eb;
-    --badge-codex: #10a37f;
+    --badge-claude: oklch(66% 0.145 296);
+    --badge-gemini: oklch(68% 0.118 221);
+    --badge-codex: oklch(70% 0.118 166);
 
     /* Shadows */
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.25);
-    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 16px 44px color-mix(in oklch, oklch(5% 0.015 250) 48%, transparent);
+    --shadow-lg: 0 30px 90px color-mix(in oklch, oklch(5% 0.015 250) 62%, transparent);
 
     /* Typography */
-    --font-sans:  'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-mono:  'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --font-sans:  'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-display: 'Sora', 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono:  'IBM Plex Mono', 'SF Mono', 'Cascadia Code', monospace;
 
     /* Syntax Highlighting */
     --sh-keyword:   #ff7b72;
@@ -103,8 +104,8 @@
     --fs-xl:   16px;
 
     /* Accent variants */
-    --accent-light: #79c0ff;
-    --text-on-accent: #fff;
+    --accent-light: oklch(82% 0.100 199);
+    --text-on-accent: oklch(14.5% 0.018 250);
 
     /* Modal backdrop */
     --modal-backdrop: rgba(0, 0, 0, 0.6);
@@ -129,72 +130,92 @@
     --capture-user-color: #c9a0ff;
 
     /* Top bar */
-    --topbar-bg: rgba(18, 23, 30, 0.85);
-    --topbar-border: rgba(48, 54, 61, 0.6);
+    --topbar-bg: color-mix(in oklch, var(--bg-secondary) 82%, transparent);
+    --topbar-border: color-mix(in oklch, var(--text-primary) 12%, transparent);
 
     /* Terminal (xterm) */
-    --xterm-background:          #0d1117;
-    --xterm-foreground:          #e6edf3;
-    --xterm-cursor:              #e6edf3;
-    --xterm-selection-background:#264f78;
-    --xterm-black:               #484f58;
-    --xterm-red:                 #f85149;
-    --xterm-green:               #3fb950;
-    --xterm-yellow:              #d29922;
-    --xterm-blue:                #58a6ff;
-    --xterm-magenta:             #bc8cff;
-    --xterm-cyan:                #39d2c0;
-    --xterm-white:               #e6edf3;
-    --xterm-bright-black:        #6e7681;
-    --xterm-bright-red:          #ffa198;
-    --xterm-bright-green:        #56d364;
-    --xterm-bright-yellow:       #e3b341;
-    --xterm-bright-blue:         #79c0ff;
-    --xterm-bright-magenta:      #d2a8ff;
-    --xterm-bright-cyan:         #56d4dd;
-    --xterm-bright-white:        #f0f6fc;
+    --xterm-background:          oklch(10.5% 0.014 250);
+    --xterm-foreground:          var(--text-primary);
+    --xterm-cursor:              var(--accent-light);
+    --xterm-selection-background:color-mix(in oklch, var(--accent) 28%, transparent);
+    --xterm-black:               oklch(25% 0.018 247);
+    --xterm-red:                 var(--error);
+    --xterm-green:               var(--success);
+    --xterm-yellow:              var(--warning);
+    --xterm-blue:                var(--accent);
+    --xterm-magenta:             var(--badge-claude);
+    --xterm-cyan:                oklch(74% 0.118 190);
+    --xterm-white:               var(--text-primary);
+    --xterm-bright-black:        var(--text-muted);
+    --xterm-bright-red:          oklch(76% 0.145 27);
+    --xterm-bright-green:        oklch(79% 0.120 166);
+    --xterm-bright-yellow:       oklch(84% 0.118 78);
+    --xterm-bright-blue:         var(--accent-light);
+    --xterm-bright-magenta:      oklch(77% 0.120 296);
+    --xterm-bright-cyan:         oklch(82% 0.100 190);
+    --xterm-bright-white:        oklch(97% 0.009 78);
 
     /* Message Board */
-    --mb-bg:          #1a1f3a;
-    --mb-text:        #e0e0e0;
-    --mb-text-bright: #f0f0f0;
-    --mb-heading:     #88c0d0;
-    --mb-code-bg:     #0a0e27;
+    --mb-bg:          color-mix(in oklch, var(--bg-tertiary) 80%, oklch(20% 0.060 250));
+    --mb-text:        var(--text-secondary);
+    --mb-text-bright: var(--text-primary);
+    --mb-heading:     var(--accent-light);
+    --mb-code-bg:     oklch(11.5% 0.016 250);
     --board-msg-bg:   transparent;
+
+    /* High-fidelity aliases used by older feature CSS and JS fallbacks. */
+    --surface-canvas: var(--bg-primary);
+    --surface-rail: oklch(16.5% 0.018 248);
+    --surface-panel: var(--bg-secondary);
+    --surface-popover: oklch(20% 0.020 248);
+    --border-subtle: color-mix(in oklch, var(--text-primary) 9%, transparent);
+    --border-strong: color-mix(in oklch, var(--text-primary) 24%, transparent);
+    --focus-ring: 0 0 0 3px color-mix(in oklch, var(--accent) 24%, transparent);
+    --accent-primary: var(--accent);
+    --hover-bg: var(--bg-hover);
+    --danger: var(--error);
+    --red: var(--error);
+    --green: var(--success);
+    --fg: var(--text-primary);
+    --fg-muted: var(--text-muted);
+    --panel-highlight: linear-gradient(135deg, color-mix(in oklch, var(--accent) 12%, transparent), transparent 54%);
+    --radius-control: 12px;
+    --radius-panel: 18px;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ── Light Theme ───────────────────────────────────────────── */
 
 [data-theme="light"] {
     /* Surface / Background — warm off-white, not pure white */
-    --bg-primary:   #f4f5f7;
-    --bg-secondary: #ecedf0;
-    --bg-tertiary:  #e2e4e8;
-    --bg-hover:     #d8dbe0;
-    --bg-elevated:  #e8eaed;
+    --bg-primary:   oklch(95.5% 0.013 83);
+    --bg-secondary: oklch(91.5% 0.014 82);
+    --bg-tertiary:  oklch(87% 0.016 82);
+    --bg-hover:     oklch(82.5% 0.018 82);
+    --bg-elevated:  oklch(94% 0.012 83);
 
     /* Borders */
-    --border:       #c9cdd3;
-    --border-light: #b0b6be;
+    --border:       color-mix(in oklch, var(--text-primary) 16%, transparent);
+    --border-light: color-mix(in oklch, var(--text-primary) 28%, transparent);
 
     /* Text */
-    --text-primary:   #1f2328;
-    --text-secondary: #59636e;
-    --text-muted:     #8b949e;
+    --text-primary:   oklch(24% 0.022 250);
+    --text-secondary: oklch(42% 0.028 245);
+    --text-muted:     oklch(58% 0.024 245);
 
     /* Accent / Brand */
-    --accent:     #0969da;
-    --accent-dim: #0550ae;
+    --accent:     oklch(49% 0.108 204);
+    --accent-dim: oklch(42% 0.100 205);
 
     /* Semantic Status */
-    --success: #1a7f37;
-    --warning: #9a6700;
-    --error:   #cf222e;
+    --success: oklch(48% 0.105 160);
+    --warning: oklch(56% 0.112 75);
+    --error:   oklch(54% 0.160 28);
 
     /* Agent Badges */
-    --badge-claude: #7c3aed;
-    --badge-gemini: #2563eb;
-    --badge-codex: #10a37f;
+    --badge-claude: oklch(52% 0.145 296);
+    --badge-gemini: oklch(51% 0.105 221);
+    --badge-codex: oklch(50% 0.105 166);
 
     /* Shadows */
     --shadow-md: 0 4px 16px rgba(31, 35, 40, 0.12);
@@ -231,8 +252,8 @@
     --color-tool-default:    #8b949e;
 
     /* Accent variants */
-    --accent-light: #0550ae;
-    --text-on-accent: #fff;
+    --accent-light: oklch(58% 0.096 199);
+    --text-on-accent: oklch(96% 0.012 83);
 
     /* Modal backdrop */
     --modal-backdrop: rgba(31, 35, 40, 0.4);
@@ -257,8 +278,8 @@
     --capture-user-color: #8250df;
 
     /* Top bar */
-    --topbar-bg: rgba(236, 237, 240, 0.92);
-    --topbar-border: rgba(201, 205, 211, 0.8);
+    --topbar-bg: color-mix(in oklch, var(--bg-secondary) 88%, transparent);
+    --topbar-border: color-mix(in oklch, var(--text-primary) 14%, transparent);
 
     /* Terminal (xterm) */
     --xterm-background:          #c8ccd2;
@@ -289,4 +310,23 @@
     --mb-heading:     #2e7d9c;
     --mb-code-bg:     #e8e8e8;
     --board-msg-bg:   transparent;
+
+    --surface-canvas: var(--bg-primary);
+    --surface-rail: oklch(89% 0.016 83);
+    --surface-panel: var(--bg-secondary);
+    --surface-popover: oklch(96% 0.011 83);
+    --border-subtle: color-mix(in oklch, var(--text-primary) 9%, transparent);
+    --border-strong: color-mix(in oklch, var(--text-primary) 26%, transparent);
+    --focus-ring: 0 0 0 3px color-mix(in oklch, var(--accent) 20%, transparent);
+    --accent-primary: var(--accent);
+    --hover-bg: var(--bg-hover);
+    --danger: var(--error);
+    --red: var(--error);
+    --green: var(--success);
+    --fg: var(--text-primary);
+    --fg-muted: var(--text-muted);
+    --panel-highlight: linear-gradient(135deg, color-mix(in oklch, var(--accent) 10%, transparent), transparent 58%);
+    --radius-control: 12px;
+    --radius-panel: 18px;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }

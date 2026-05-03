@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/cdknorow/coral/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -142,34 +144,34 @@ func TestExtractClaudeUsage_NonexistentFile(t *testing.T) {
 
 func TestEstimateCost_ClaudeModels(t *testing.T) {
 	tests := []struct {
-		name        string
-		model       string
-		input       int
-		output      int
-		cacheRead   int
-		cacheWrite  int
-		minCost     float64
+		name       string
+		model      string
+		input      int
+		output     int
+		cacheRead  int
+		cacheWrite int
+		minCost    float64
 	}{
 		{
-			name: "claude-sonnet-4-6",
+			name:  "claude-sonnet-4-6",
 			model: "claude-sonnet-4-6",
 			input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0,
 			minCost: 3.00 + 15.00, // $3/M input + $15/M output
 		},
 		{
-			name: "claude-opus-4-6",
+			name:  "claude-opus-4-6",
 			model: "claude-opus-4-6",
 			input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0,
 			minCost: 15.00 + 75.00,
 		},
 		{
-			name: "claude-sonnet with cache read",
+			name:  "claude-sonnet with cache read",
 			model: "claude-sonnet-4-6",
 			input: 1000, output: 500, cacheRead: 10000, cacheWrite: 0,
 			minCost: 0, // just verify it's > 0
 		},
 		{
-			name: "claude-sonnet with cache write",
+			name:  "claude-sonnet with cache write",
 			model: "claude-sonnet-4-6",
 			input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 1_000_000,
 			minCost: 3.00 + 15.00 + 3.75, // $3/M input + $15/M output + $3.75/M cache write
@@ -213,4 +215,55 @@ func TestExtractCodexUsage_NoTokenCounts(t *testing.T) {
 	path := writeTestJSONL(t, jsonl)
 	usage := extractCodexUsage(path)
 	assert.Nil(t, usage)
+}
+
+func TestExtractCodexUsage_ModelAndContextWindow(t *testing.T) {
+	jsonl := `{"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp"}}
+{"type":"turn_context","payload":{"model":"gpt-5.5","cwd":"/tmp"}}
+{"type":"event_msg","timestamp":"2026-01-01T00:00:03Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"reasoning_output_tokens":20,"total_tokens":1120},"model_context_window":258400}}}
+`
+	path := writeTestJSONL(t, jsonl)
+	usage := extractCodexUsage(path)
+
+	require.NotNil(t, usage)
+	require.Len(t, usage.Calls, 1)
+	assert.Equal(t, "gpt-5.5", usage.Model)
+	assert.Equal(t, 258400, usage.ContextWindow)
+	assert.Equal(t, 1000, usage.Calls[0].InputTokens)
+	assert.Equal(t, 400, usage.Calls[0].CachedInput)
+	assert.Equal(t, 120, usage.Calls[0].OutputTokens)
+	assert.Equal(t, 1120, usage.Calls[0].TotalTokens)
+}
+
+func TestFindCodexRollout_MatchesRoleWhenCwdIsShared(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	sessionDir := filepath.Join(codexHome, "sessions", "2026", "04", "30")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	createdAt := time.Now().UTC()
+	writeRollout := func(name, role string) string {
+		path := filepath.Join(sessionDir, name)
+		content := `{"type":"session_meta","payload":{"timestamp":"` + createdAt.Format(time.RFC3339Nano) + `","cwd":"/repo"}}
+{"type":"turn_context","payload":{"cwd":"/repo","model":"gpt-5.5","developer_instructions":"You were automatically joined to message board \"Codex Team\". Your role is: ` + role + `. Do NOT run coral-board join."}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":258400,"total_token_usage":{"input_tokens":1,"total_tokens":1}}}}
+`
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+		return path
+	}
+	qaPath := writeRollout("rollout-2026-04-30T05-17-14-qa.jsonl", "QA Engineer")
+	leadPath := writeRollout("rollout-2026-04-30T05-17-14-lead.jsonl", "Lead Developer")
+
+	board := "Codex Team"
+	display := "Lead Developer"
+	ls := &store.LiveSession{
+		SessionID:   "coral-session-id",
+		WorkingDir:  "/repo",
+		DisplayName: &display,
+		BoardName:   &board,
+		CreatedAt:   createdAt.Format(time.RFC3339Nano),
+	}
+
+	assert.Equal(t, leadPath, findCodexRollout(ls))
+	assert.NotEqual(t, qaPath, findCodexRollout(ls))
 }

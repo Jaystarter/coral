@@ -16,13 +16,13 @@
     <title>Coral</title>
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <link rel="manifest" href="/static/manifest.json">
-    <meta name="theme-color" content="#0a0e14">
+    <meta name="theme-color" content="#081118">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="/static/coral.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;450;500;600;700&family=IBM+Plex+Sans:wght@400;450;500;600;700&family=Sora:wght@500;600;700;800&display=swap">
     <link rel="stylesheet" href="/static/css/variables.css">
     <link rel="stylesheet" href="/static/css/animations.css">
     <link rel="stylesheet" href="/static/css/base.css">
@@ -40,6 +40,7 @@
     <link rel="stylesheet" href="/static/css/cost_dashboard.css">
     <link rel="stylesheet" href="/static/css/docs.css">
     <link rel="stylesheet" href="/static/css/theme-configurator.css">
+    <link rel="stylesheet" href="/static/css/atelier.css">
     <link rel="stylesheet" href="/static/css/mobile.css">
     <!-- Platform-specific CSS — loaded for all targets, scoped by class selectors -->
     <link rel="stylesheet" href="/static/css/native.css">
@@ -66,7 +67,11 @@
                     <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
                 </svg>
             </button>
-            <span class="top-bar-title"></span>
+            <span class="top-bar-title">
+                <img class="top-bar-logo" src="/static/coral_logo.svg" alt="" aria-hidden="true">
+                <span class="top-bar-product">Coral</span>
+                <span class="top-bar-subtitle">Local Agent Control</span>
+            </span>
         </div>
         <nav class="top-nav-tabs" role="tablist" aria-label="Main navigation">
             <button class="top-nav-tab active" id="nav-tab-agents" onclick="switchNavTab('agents')">Agents</button>
@@ -160,43 +165,49 @@
             <div id="mobile-agent-list" class="mobile-agent-list"></div>
 
             <div id="welcome-screen" class="welcome">
-                <h2>Welcome to Coral</h2>
-                <p>Select a session from the sidebar, or launch a team:</p>
+                <div class="welcome-kicker">Local orchestration console</div>
+                <h2><span>Launch a command room.</span><span>Watch every agent think.</span></h2>
+                <p>Stage a local team, inspect live worktrees, and intervene before the run drifts.</p>
+                <div class="welcome-system-strip" aria-label="Core capabilities">
+                    <span>tmux backed</span>
+                    <span>isolated worktrees</span>
+                    <span>live intervention</span>
+                </div>
                 <button class="welcome-wizard-card" onclick="window.showTeamWizardModal()" aria-label="Create Your Own Team">
-                    <span class="welcome-wizard-badge">AI generated</span>
-                    <span class="material-icons welcome-wizard-icon">auto_awesome</span>
+                    <span class="welcome-wizard-badge">Mission Builder</span>
+                    <span class="material-icons welcome-wizard-icon">hub</span>
                     <div class="welcome-wizard-copy">
-                        <strong>Create Your Own Team</strong>
-                        <span>Describe the mission, choose the roles you want, and let Coral draft the team before launch.</span>
+                        <strong>Compose a bespoke agent room</strong>
+                        <span>Describe the mission, assign roles, and let Coral stage a coordinated local team before launch.</span>
                     </div>
                     <span class="material-icons welcome-wizard-arrow">arrow_forward</span>
                 </button>
-                <div class="welcome-team-presets">
+                <div class="welcome-team-presets welcome-team-presets--agents">
                     <button class="welcome-team-card" onclick="window._launchTeamPreset('Coding Team')">
                         <span class="material-icons welcome-team-icon">code</span>
-                        <strong>Coding Team</strong>
+                        <strong>Engineering Review</strong>
                         <span class="welcome-team-desc">Lead Dev, QA, Frontend Dev, Security Reviewer</span>
                         <span class="welcome-team-count">5 agents</span>
                     </button>
                     <button class="welcome-team-card" onclick="window._launchTeamPreset('Consumer Research')">
                         <span class="material-icons welcome-team-icon">groups</span>
-                        <strong>Consumer Research</strong>
+                        <strong>Research Council</strong>
                         <span class="welcome-team-desc">10 consumer personas + Experiment Designer</span>
                         <span class="welcome-team-count">12 agents</span>
                     </button>
                     <button class="welcome-team-card" onclick="window._launchTeamPreset('Dungeon Master')">
                         <span class="material-icons welcome-team-icon">castle</span>
-                        <strong>Dungeon Master</strong>
+                        <strong>Scenario Room</strong>
                         <span class="welcome-team-desc">Fantasy RPG with 4 heroes and 2 villains</span>
                         <span class="welcome-team-count">7 agents</span>
                     </button>
                 </div>
                 <div class="welcome-section-label">Automations</div>
-                <div class="welcome-team-presets">
+                <div class="welcome-team-presets welcome-team-presets--automation">
                     <button class="welcome-team-card" onclick="window.showJobModal()">
                         <span class="material-icons welcome-team-icon">schedule</span>
                         <strong>Scheduled Jobs</strong>
-                        <span class="welcome-team-desc">Run agents on a cron schedule — daily reports, monitoring, recurring tasks</span>
+                        <span class="welcome-team-desc">Run agents on a cron schedule for reports, monitoring, and recurring tasks</span>
                     </button>
                     <button class="welcome-team-card" onclick="window.showWorkflowCreateModal()">
                         <span class="material-icons welcome-team-icon">account_tree</span>
@@ -210,10 +221,6 @@
                     </button>
                 </div>
                 <div class="welcome-actions">
-                    <button class="welcome-action-card welcome-action-card--create" onclick="window.showTeamWizardModal()" aria-label="Create Your Own Team">
-                        <span class="material-icons">auto_awesome</span>
-                        <span>Create Your Own Team</span>
-                    </button>
                     <button class="welcome-action-card" onclick="showLaunchModal()" aria-label="Launch Agent">
                         <span class="material-icons">add_circle</span>
                         <span>Launch Agent</span>
@@ -221,10 +228,6 @@
                     <button class="welcome-action-card" onclick="showLaunchModal(); if (window._selectLaunchType) window._selectLaunchType('team')" aria-label="Custom Team">
                         <span class="material-icons">groups</span>
                         <span>Custom Team</span>
-                    </button>
-                    <button class="welcome-action-card" onclick="window._showMobileConnectModal()" aria-label="Coral Mobile">
-                        <span class="material-icons">phone_iphone</span>
-                        <span>Mobile</span>
                     </button>
                 </div>
                 <div class="welcome-secondary">

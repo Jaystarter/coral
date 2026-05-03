@@ -1,6 +1,7 @@
 package background
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -118,6 +119,19 @@ func (p *TokenPoller) pollCodexSession(ctx context.Context, ls *store.LiveSessio
 	if usage == nil || len(usage.Calls) == 0 {
 		return
 	}
+	model := usage.Model
+	if model == "" && ls.Model != nil {
+		model = *ls.Model
+	}
+	contextWindow := usage.ContextWindow
+	if contextWindow == 0 {
+		contextWindow = proxy.LookupContextWindow(model)
+	}
+	if contextWindow > 0 {
+		if err := p.sessionStore.UpdateContextWindow(ctx, ls.SessionID, contextWindow, model); err != nil {
+			p.logger.Debug("failed to update Codex context window", "session_id", ls.SessionID[:8], "error", err)
+		}
+	}
 
 	// Skip entries we've already processed
 	alreadyProcessed := p.lastEntryCount[ls.SessionID]
@@ -140,6 +154,10 @@ func (p *TokenPoller) pollCodexSession(ctx context.Context, ls *store.LiveSessio
 		deltaOutput := call.OutputTokens - prev.Output
 		deltaCached := call.CachedInput - prev.Cached
 		deltaTotal := call.TotalTokens - prev.Total
+		deltaFreshInput := deltaInput - deltaCached
+		if deltaFreshInput < 0 {
+			deltaFreshInput = deltaInput
+		}
 
 		// Skip zero-delta entries (e.g. first token_count with all zeros)
 		if deltaInput == 0 && deltaOutput == 0 {
@@ -154,7 +172,7 @@ func (p *TokenPoller) pollCodexSession(ctx context.Context, ls *store.LiveSessio
 		if model == "" {
 			model = "gpt-5.4"
 		}
-		costUSD := estimateCost(model, deltaInput, deltaOutput, deltaCached, 0)
+		costUSD := estimateCost(model, deltaFreshInput, deltaOutput, deltaCached, 0)
 
 		record := &store.TokenUsage{
 			SessionID:       ls.SessionID,
@@ -162,7 +180,7 @@ func (p *TokenPoller) pollCodexSession(ctx context.Context, ls *store.LiveSessio
 			AgentType:       at.Codex,
 			TeamID:          ls.TeamID,
 			BoardName:       ls.BoardName,
-			InputTokens:     deltaInput,
+			InputTokens:     deltaFreshInput,
 			OutputTokens:    deltaOutput,
 			CacheReadTokens: deltaCached,
 			TotalTokens:     deltaTotal,
@@ -220,6 +238,8 @@ type codexCallData struct {
 type codexUsageData struct {
 	Calls          []codexCallData
 	SessionStartAt string
+	Model          string
+	ContextWindow  int
 }
 
 // extractCodexUsage reads a Codex rollout JSONL file and extracts ALL
@@ -258,6 +278,7 @@ func extractCodexUsage(path string) *codexUsageData {
 						ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 						TotalTokens           int `json:"total_tokens"`
 					} `json:"total_token_usage"`
+					ModelContextWindow int `json:"model_context_window"`
 				} `json:"info"`
 				Model string `json:"model"`
 				CWD   string `json:"cwd"`
@@ -274,10 +295,14 @@ func extractCodexUsage(path string) *codexUsageData {
 
 		if entry.Type == "turn_context" && entry.Payload.Model != "" {
 			currentModel = entry.Payload.Model
+			result.Model = entry.Payload.Model
 		}
 
 		if entry.Type == "event_msg" && entry.Payload.Type == "token_count" {
 			tu := entry.Payload.Info.TotalTokenUsage
+			if entry.Payload.Info.ModelContextWindow > 0 {
+				result.ContextWindow = entry.Payload.Info.ModelContextWindow
+			}
 			result.Calls = append(result.Calls, codexCallData{
 				InputTokens:  tu.InputTokens,
 				OutputTokens: tu.OutputTokens + tu.ReasoningOutputTokens,
@@ -314,7 +339,9 @@ func findCodexRollout(ls *store.LiveSession) string {
 		return matches[0]
 	}
 
-	// Strategy 2: Find recently modified rollout files and match by working dir
+	// Strategy 2: Find recently modified rollout files and match by working dir,
+	// board, and role. Codex rollout filenames do not contain Coral session IDs,
+	// and multi-agent launches often create several files with the same cwd.
 	type rolloutFile struct {
 		path  string
 		mtime time.Time
@@ -322,16 +349,7 @@ func findCodexRollout(ls *store.LiveSession) string {
 	var candidates []rolloutFile
 
 	// Parse session creation time (stored as RFC3339 with microseconds)
-	sessionCreated, _ := time.Parse(time.RFC3339Nano, ls.CreatedAt)
-	if sessionCreated.IsZero() {
-		sessionCreated, _ = time.Parse(time.RFC3339, ls.CreatedAt)
-	}
-	if sessionCreated.IsZero() {
-		sessionCreated, _ = time.Parse("2006-01-02T15:04:05Z", ls.CreatedAt)
-	}
-	if sessionCreated.IsZero() {
-		sessionCreated, _ = time.Parse("2006-01-02 15:04:05", ls.CreatedAt)
-	}
+	sessionCreated := parseCodexTime(ls.CreatedAt)
 
 	_ = filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") {
@@ -351,37 +369,79 @@ func findCodexRollout(ls *store.LiveSession) string {
 		return candidates[i].mtime.After(candidates[j].mtime)
 	})
 
-	// Check each candidate's cwd against the session's working dir
+	expectedBoard := ""
+	if ls.BoardName != nil {
+		expectedBoard = strings.TrimSpace(*ls.BoardName)
+	}
+	expectedRole := ""
+	if ls.DisplayName != nil {
+		expectedRole = strings.TrimSpace(*ls.DisplayName)
+	}
+
+	var bestPath string
+	bestScore := -1
+	bestDelta := 24 * time.Hour
 	for _, c := range candidates {
-		cwd := peekCodexCWD(c.path)
-		if cwd != "" && cwd == ls.WorkingDir {
-			return c.path
+		meta := peekCodexMetadata(c.path)
+		if meta.CWD != "" && ls.WorkingDir != "" && meta.CWD != ls.WorkingDir {
+			continue
 		}
+		if expectedBoard != "" && meta.BoardName != "" && !strings.EqualFold(meta.BoardName, expectedBoard) {
+			continue
+		}
+		if expectedRole != "" && meta.Role != "" && !strings.EqualFold(meta.Role, expectedRole) {
+			continue
+		}
+
+		score := 0
+		if meta.CWD != "" && meta.CWD == ls.WorkingDir {
+			score += 20
+		}
+		if expectedBoard != "" && strings.EqualFold(meta.BoardName, expectedBoard) {
+			score += 30
+		}
+		if expectedRole != "" && strings.EqualFold(meta.Role, expectedRole) {
+			score += 50
+		}
+		if score == 0 {
+			continue
+		}
+
+		delta := 24 * time.Hour
+		if !sessionCreated.IsZero() {
+			if !meta.StartedAt.IsZero() {
+				delta = meta.StartedAt.Sub(sessionCreated).Abs()
+			} else {
+				delta = c.mtime.Sub(sessionCreated).Abs()
+			}
+		}
+		if score > bestScore || (score == bestScore && delta < bestDelta) {
+			bestPath = c.path
+			bestScore = score
+			bestDelta = delta
+		}
+	}
+	if bestPath != "" && (bestScore >= 50 || bestDelta < 5*time.Minute) {
+		return bestPath
 	}
 
 	// Fallback: if we have a session creation time, pick the rollout file
 	// created closest to it
 	if !sessionCreated.IsZero() && len(candidates) > 0 {
-		var bestPath string
-		var bestDelta time.Duration = time.Hour * 24
+		bestPath = ""
+		bestDelta = 24 * time.Hour
 		for _, c := range candidates {
-			// Parse timestamp from filename: rollout-YYYY-MM-DDTHH-MM-SS-{uuid}.jsonl
-			base := filepath.Base(c.path)
-			if !strings.HasPrefix(base, "rollout-") {
+			meta := peekCodexMetadata(c.path)
+			if meta.CWD != "" && ls.WorkingDir != "" && meta.CWD != ls.WorkingDir {
 				continue
 			}
-			// Extract timestamp portion
-			parts := strings.SplitN(strings.TrimPrefix(base, "rollout-"), "-", 7)
-			if len(parts) >= 6 {
-				ts := strings.Join(parts[:6], "-")
-				// Format: 2026-03-29T00-03-11 → 2006-01-02T15-04-05
-				if t, err := time.Parse("2006-01-02T15-04-05", ts); err == nil {
-					delta := t.Sub(sessionCreated).Abs()
-					if delta < bestDelta {
-						bestDelta = delta
-						bestPath = c.path
-					}
-				}
+			if meta.StartedAt.IsZero() {
+				continue
+			}
+			delta := meta.StartedAt.Sub(sessionCreated).Abs()
+			if delta < bestDelta {
+				bestDelta = delta
+				bestPath = c.path
 			}
 		}
 		if bestPath != "" && bestDelta < 5*time.Minute {
@@ -392,42 +452,116 @@ func findCodexRollout(ls *store.LiveSession) string {
 	return ""
 }
 
-// peekCodexCWD reads the first few lines of a Codex rollout file to extract
-// the working directory from a turn_context entry.
-func peekCodexCWD(path string) string {
+type codexRolloutMetadata struct {
+	CWD           string
+	BoardName     string
+	Role          string
+	Model         string
+	ContextWindow int
+	StartedAt     time.Time
+}
+
+func parseCodexTime(value string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// peekCodexMetadata scans the first rollout records without assuming short
+// JSONL lines; Codex session_meta and turn_context records can be very large.
+func peekCodexMetadata(path string) codexRolloutMetadata {
+	var result codexRolloutMetadata
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return result
 	}
 	defer f.Close()
 
-	// Read first 32KB — turn_context is usually in the first few entries
-	buf := make([]byte, 32*1024)
-	n, _ := f.Read(buf)
-	if n == 0 {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(buf[:n]), "\n") {
-		line = strings.TrimSpace(line)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for i := 0; scanner.Scan() && i < 80; i++ {
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 		var entry struct {
-			Type    string `json:"type"`
-			Payload struct {
-				CWD string `json:"cwd"`
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Payload   struct {
+				ID                    string `json:"id"`
+				Timestamp             string `json:"timestamp"`
+				Type                  string `json:"type"`
+				CWD                   string `json:"cwd"`
+				Model                 string `json:"model"`
+				DeveloperInstructions string `json:"developer_instructions"`
+				Info                  struct {
+					ModelContextWindow int `json:"model_context_window"`
+				} `json:"info"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		// Both session_meta and turn_context have cwd
-		if (entry.Type == "session_meta" || entry.Type == "turn_context") && entry.Payload.CWD != "" {
-			return entry.Payload.CWD
+		if entry.Type == "session_meta" {
+			if entry.Payload.CWD != "" {
+				result.CWD = entry.Payload.CWD
+			}
+			if result.StartedAt.IsZero() {
+				result.StartedAt = parseCodexTime(entry.Payload.Timestamp)
+				if result.StartedAt.IsZero() {
+					result.StartedAt = parseCodexTime(entry.Timestamp)
+				}
+			}
+		}
+		if entry.Type == "turn_context" {
+			if entry.Payload.CWD != "" {
+				result.CWD = entry.Payload.CWD
+			}
+			if entry.Payload.Model != "" {
+				result.Model = entry.Payload.Model
+			}
+			board, role := parseCodexBoardIdentity(entry.Payload.DeveloperInstructions)
+			if board != "" {
+				result.BoardName = board
+			}
+			if role != "" {
+				result.Role = role
+			}
+		}
+		if entry.Type == "event_msg" && entry.Payload.Type == "token_count" && entry.Payload.Info.ModelContextWindow > 0 {
+			result.ContextWindow = entry.Payload.Info.ModelContextWindow
+		}
+		if result.CWD != "" && result.BoardName != "" && result.Role != "" && result.Model != "" && result.ContextWindow > 0 {
+			break
 		}
 	}
-	return ""
+	return result
+}
+
+func parseCodexBoardIdentity(text string) (string, string) {
+	board := ""
+	role := ""
+	if idx := strings.Index(text, `message board "`); idx >= 0 {
+		rest := text[idx+len(`message board "`):]
+		if end := strings.IndexByte(rest, '"'); end >= 0 {
+			board = strings.TrimSpace(rest[:end])
+		}
+	}
+	lower := strings.ToLower(text)
+	if idx := strings.Index(lower, "your role is:"); idx >= 0 {
+		rest := strings.TrimSpace(text[idx+len("your role is:"):])
+		end := len(rest)
+		for _, sep := range []string{".", "\n"} {
+			if pos := strings.Index(rest, sep); pos >= 0 && pos < end {
+				end = pos
+			}
+		}
+		role = strings.TrimSpace(rest[:end])
+	}
+	return board, role
 }
 
 // ── Claude JSONL token tracking ───────────────────────────────
@@ -475,6 +609,18 @@ func (p *TokenPoller) pollClaudeSession(ctx context.Context, ls *store.LiveSessi
 	usage := extractClaudeUsage(jsonlPath)
 	if usage == nil || len(usage.Calls) == 0 {
 		return
+	}
+	for i := len(usage.Calls) - 1; i >= 0; i-- {
+		model := usage.Calls[i].Model
+		if model == "" {
+			continue
+		}
+		if contextWindow := proxy.LookupContextWindow(model); contextWindow > 0 {
+			if err := p.sessionStore.UpdateContextWindow(ctx, ls.SessionID, contextWindow, model); err != nil {
+				p.logger.Debug("failed to update Claude context window", "session_id", ls.SessionID[:8], "error", err)
+			}
+		}
+		break
 	}
 
 	// Skip entries we've already processed

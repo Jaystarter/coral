@@ -25,35 +25,35 @@ import (
 	at "github.com/cdknorow/coral/internal/agenttypes"
 	"github.com/cdknorow/coral/internal/board"
 	"github.com/cdknorow/coral/internal/config"
-	"github.com/cdknorow/coral/internal/naming"
 	"github.com/cdknorow/coral/internal/gitutil"
 	"github.com/cdknorow/coral/internal/httputil"
 	"github.com/cdknorow/coral/internal/jsonl"
 	"github.com/cdknorow/coral/internal/license"
+	"github.com/cdknorow/coral/internal/naming"
 	"github.com/cdknorow/coral/internal/proxy"
-	"github.com/cdknorow/coral/internal/pulse"
 	"github.com/cdknorow/coral/internal/ptymanager"
+	"github.com/cdknorow/coral/internal/pulse"
 	"github.com/cdknorow/coral/internal/store"
 	"github.com/cdknorow/coral/internal/tracking"
 )
 
 // SessionsHandler handles all live session API endpoints.
 type SessionsHandler struct {
-	db      *store.DB
-	ss      *store.SessionStore
-	ts      *store.TaskStore
-	gs      *store.GitStore
-	bs      *board.Store
-	cfg     *config.Config
+	db       *store.DB
+	ss       *store.SessionStore
+	ts       *store.TaskStore
+	gs       *store.GitStore
+	bs       *board.Store
+	cfg      *config.Config
 	terminal ptymanager.SessionTerminal
-	jsonl   *jsonl.SessionReader
-	backend ptymanager.TerminalBackend // nil = use tmux directly
+	jsonl    *jsonl.SessionReader
+	backend  ptymanager.TerminalBackend // nil = use tmux directly
 
-	boardHandler  *BoardHandler        // for sleep/wake board pausing
-	licenseMgr    *license.Manager     // for runtime trial limit checks
-	schedStore    *store.ScheduleStore // for active runs in websocket
-	notifications *NotificationStore   // for UI notifications via websocket
-	teamStore     *store.TeamStore     // for team persistence
+	boardHandler  *BoardHandler          // for sleep/wake board pausing
+	licenseMgr    *license.Manager       // for runtime trial limit checks
+	schedStore    *store.ScheduleStore   // for active runs in websocket
+	notifications *NotificationStore     // for UI notifications via websocket
+	teamStore     *store.TeamStore       // for team persistence
 	tokenStore    *store.TokenUsageStore // for token usage tracking
 
 	// Deduplication state for status/summary events (mirrors Python _last_known)
@@ -120,9 +120,9 @@ func (h *SessionsHandler) getDiffMode(ctx context.Context) string {
 
 // resolveModel returns the effective model for a launch. A non-empty
 // requestModel always wins (after trimming whitespace). Otherwise it falls
-// back to the user's default_model_<agentType> setting. Returns "" if
-// neither is set. Terminal agents never receive a model.
-func (h *SessionsHandler) resolveModel(ctx context.Context, agentType, requestModel string) string {
+// back to Coral settings, then the underlying CLI's own config. Terminal
+// agents never receive a model.
+func (h *SessionsHandler) resolveModel(ctx context.Context, agentType, requestModel, workingDir string) string {
 	if agentType == at.Terminal {
 		return ""
 	}
@@ -133,26 +133,42 @@ func (h *SessionsHandler) resolveModel(ctx context.Context, agentType, requestMo
 		return ""
 	}
 	settings, err := h.ss.GetSettings(ctx)
-	if err != nil {
-		return ""
+	if err == nil {
+		if m := strings.TrimSpace(settings["default_model_"+agentType]); m != "" {
+			return m
+		}
 	}
-	return strings.TrimSpace(settings["default_model_"+agentType])
+	return agent.ConfiguredModel(agentType, workingDir)
 }
 
 // defaultModelFromSettings looks up default_model_<agentType> in an already-loaded
-// settings map. Used by LaunchTeam to avoid re-reading settings per agent.
-// Terminal agents never receive a model.
-func defaultModelFromSettings(settings map[string]string, agentType, requestModel string) string {
+// settings map, then falls back to the underlying CLI config. Used by
+// LaunchTeam to avoid re-reading settings per agent. Terminal agents never
+// receive a model.
+func defaultModelFromSettings(settings map[string]string, agentType, requestModel, workingDir string) string {
 	if agentType == at.Terminal {
 		return ""
 	}
 	if m := strings.TrimSpace(requestModel); m != "" {
 		return m
 	}
-	if agentType == "" || settings == nil {
+	if agentType == "" {
 		return ""
 	}
-	return strings.TrimSpace(settings["default_model_"+agentType])
+	if settings != nil {
+		if m := strings.TrimSpace(settings["default_model_"+agentType]); m != "" {
+			return m
+		}
+	}
+	return agent.ConfiguredModel(agentType, workingDir)
+}
+
+func contextWindowForLaunch(agentType, workingDir, model string) int {
+	contextWindow := proxy.LookupContextWindow(model)
+	if configured := agent.ConfiguredContextWindow(agentType, workingDir); configured > contextWindow {
+		contextWindow = configured
+	}
+	return contextWindow
 }
 
 // NewSessionsHandler creates a SessionsHandler with the given dependencies.
@@ -175,12 +191,12 @@ func NewSessionsHandler(db *store.DB, cfg *config.Config, backend ptymanager.Ter
 
 // AgentInfo represents a discovered live agent.
 type AgentInfo struct {
-	AgentType    string `json:"agent_type"`
-	AgentName    string `json:"agent_name"`
-	SessionID    string `json:"session_id"`
-	TmuxSession  string `json:"tmux_session"`
-	LogPath      string `json:"log_path"`
-	WorkingDir   string `json:"working_directory"`
+	AgentType   string `json:"agent_type"`
+	AgentName   string `json:"agent_name"`
+	SessionID   string `json:"session_id"`
+	TmuxSession string `json:"tmux_session"`
+	LogPath     string `json:"log_path"`
+	WorkingDir  string `json:"working_directory"`
 }
 
 func (h *SessionsHandler) discoverAgents(ctx *http.Request) ([]AgentInfo, error) {
@@ -371,7 +387,7 @@ func (h *SessionsHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback: board_name from live_sessions DB for agents not yet subscribed
 	liveBoardNames := make(map[string][2]string) // session_id -> [board_name, display_name]
-	liveSleeping := make(map[string]bool)         // session_id -> is_sleeping
+	liveSleeping := make(map[string]bool)        // session_id -> is_sleeping
 	type liveExtra struct {
 		Prompt        *string
 		Model         *string
@@ -395,7 +411,9 @@ func (h *SessionsHandler) List(w http.ResponseWriter, r *http.Request) {
 				if r.BoardName != nil {
 					bn := *r.BoardName
 					dn := ""
-					if r.DisplayName != nil { dn = *r.DisplayName }
+					if r.DisplayName != nil {
+						dn = *r.DisplayName
+					}
 					liveBoardNames[r.SessionID] = [2]string{bn, dn}
 				}
 				if r.IsSleeping == 1 {
@@ -1719,6 +1737,12 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		storedModel = body.Model
 		storedContextWindow = proxy.LookupContextWindow(body.Model)
 	}
+	if storedModel == "" {
+		storedModel = agent.ConfiguredModel(agentType, pane.CurrentPath)
+		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
+	} else if storedContextWindow == 0 {
+		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
+	}
 	if body.Capabilities != nil {
 		storedCaps = body.Capabilities
 		storedCapsJSON = store.MarshalCapabilities(body.Capabilities)
@@ -1811,17 +1835,17 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 
 	// Replace live session in DB (carry forward stored fields)
 	h.ss.ReplaceLiveSession(ctx, body.SessionID, &store.LiveSession{
-		SessionID:    newSessionID,
-		AgentType:    agentType,
-		AgentName:    folderName,
-		WorkingDir:   pane.CurrentPath,
-		ResumeFromID: strPtr(body.SessionID),
-		Flags:        store.MarshalFlags(allFlags),
-		Prompt:       strPtr(storedPrompt),
-		BoardName:    strPtr(storedBoard),
-		BoardServer:  strPtr(storedBoardServer),
-		BoardType:    strPtr(storedBoardType),
-		Capabilities: storedCapsJSON,
+		SessionID:     newSessionID,
+		AgentType:     agentType,
+		AgentName:     folderName,
+		WorkingDir:    pane.CurrentPath,
+		ResumeFromID:  strPtr(body.SessionID),
+		Flags:         store.MarshalFlags(allFlags),
+		Prompt:        strPtr(storedPrompt),
+		BoardName:     strPtr(storedBoard),
+		BoardServer:   strPtr(storedBoardServer),
+		BoardType:     strPtr(storedBoardType),
+		Capabilities:  storedCapsJSON,
 		Model:         strPtr(storedModel),
 		ContextWindow: storedContextWindow,
 		Tools:         storedToolsJSON,
@@ -2023,21 +2047,21 @@ func (h *SessionsHandler) SetDisplayName(w http.ResponseWriter, r *http.Request)
 // POST /api/sessions/launch
 func (h *SessionsHandler) Launch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		WorkingDir      string             `json:"working_dir"`
-		AgentType       string             `json:"agent_type"`
-		DisplayName     string             `json:"display_name"`
-		Flags           []string           `json:"flags"`
-		Prompt          string             `json:"prompt"`
-		BoardName       string             `json:"board_name"`
-		BoardServer     string             `json:"board_server"`
-		Backend         string             `json:"backend"`
-		BoardType       string             `json:"board_type"`
-		Model           string             `json:"model"`
-		ResumeSessionID string             `json:"resume_session_id"`
-		Capabilities *agent.Capabilities      `json:"capabilities"`
-		Tools        []string                `json:"tools"`
-		MCPServers   map[string]any          `json:"mcpServers"`
-		Hooks        map[string]interface{}  `json:"hooks"`
+		WorkingDir      string                 `json:"working_dir"`
+		AgentType       string                 `json:"agent_type"`
+		DisplayName     string                 `json:"display_name"`
+		Flags           []string               `json:"flags"`
+		Prompt          string                 `json:"prompt"`
+		BoardName       string                 `json:"board_name"`
+		BoardServer     string                 `json:"board_server"`
+		Backend         string                 `json:"backend"`
+		BoardType       string                 `json:"board_type"`
+		Model           string                 `json:"model"`
+		ResumeSessionID string                 `json:"resume_session_id"`
+		Capabilities    *agent.Capabilities    `json:"capabilities"`
+		Tools           []string               `json:"tools"`
+		MCPServers      map[string]any         `json:"mcpServers"`
+		Hooks           map[string]interface{} `json:"hooks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		errBadRequest(w, "invalid JSON")
@@ -2068,8 +2092,12 @@ func (h *SessionsHandler) Launch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve model: request wins, else per-type default from settings.
-	effectiveModel := h.resolveModel(r.Context(), body.AgentType, body.Model)
+	// Resolve model: request wins, else per-type default or CLI config.
+	modelDir := body.WorkingDir
+	if abs, err := filepath.Abs(body.WorkingDir); err == nil {
+		modelDir = abs
+	}
+	effectiveModel := h.resolveModel(r.Context(), body.AgentType, body.Model, modelDir)
 
 	// Add model flag if resolved to non-empty
 	launchFlags := body.Flags
@@ -2107,14 +2135,14 @@ func (h *SessionsHandler) LaunchTeam(w http.ResponseWriter, r *http.Request) {
 		BoardType   string   `json:"board_type"`
 		Worktree    bool     `json:"worktree"`
 		BaseBranch  string   `json:"base_branch"`
-		Agents []struct {
-			Name         string              `json:"name"`
-			Prompt       string              `json:"prompt"`
-			Capabilities *agent.Capabilities `json:"capabilities"`
-			AgentType    string              `json:"agent_type"`
-			Model        string              `json:"model"`
-			Tools        []string              `json:"tools"`
-			MCPServers   map[string]any        `json:"mcpServers"`
+		Agents      []struct {
+			Name         string                 `json:"name"`
+			Prompt       string                 `json:"prompt"`
+			Capabilities *agent.Capabilities    `json:"capabilities"`
+			AgentType    string                 `json:"agent_type"`
+			Model        string                 `json:"model"`
+			Tools        []string               `json:"tools"`
+			MCPServers   map[string]any         `json:"mcpServers"`
 			Hooks        map[string]interface{} `json:"hooks"`
 		} `json:"agents"`
 	}
@@ -2214,8 +2242,8 @@ func (h *SessionsHandler) LaunchTeam(w http.ResponseWriter, r *http.Request) {
 			agentType = agentDef.AgentType
 		}
 
-		// Resolve model: per-agent request wins, else user's default_model_<type>.
-		effectiveModel := defaultModelFromSettings(userSettings, agentType, agentDef.Model)
+		// Resolve model: per-agent request wins, else default_model_<type> or CLI config.
+		effectiveModel := defaultModelFromSettings(userSettings, agentType, agentDef.Model, workingDir)
 
 		// Build per-agent flags: start with team-level, add model if resolved
 		agentFlags := make([]string, len(body.Flags))
@@ -2387,6 +2415,9 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		modelStr := ""
 		if cfg.Model != nil {
 			modelStr = *cfg.Model
+		}
+		if modelStr == "" {
+			modelStr = agent.ConfiguredModel(cfg.AgentType, cfg.WorkingDir)
 		}
 		var caps *agent.Capabilities
 		if cfg.Capabilities != nil && *cfg.Capabilities != "" {
@@ -2756,7 +2787,6 @@ func (h *SessionsHandler) findLogPath(agentType, sessionID string) string {
 // Kept as a short name since it's called 220+ times across route handlers.
 var writeJSON = httputil.WriteJSON
 
-
 func generateUUID() string {
 	b := make([]byte, 16)
 	crand.Read(b)
@@ -2954,24 +2984,24 @@ func (h *SessionsHandler) launchSession(ctx context.Context, workDir, agentType,
 
 	// Register in DB
 	h.ss.RegisterLiveSession(ctx, &store.LiveSession{
-		SessionID:    sessionID,
-		AgentType:    agentType,
-		AgentName:    folderName,
-		WorkingDir:   absDir,
-		DisplayName:  strPtr(displayName),
-		ResumeFromID: strPtr(resumeSessionID),
-		Flags:        store.MarshalFlags(flags),
-		Prompt:       strPtr(prompt),
-		BoardName:    strPtr(boardName),
-		BoardServer:  strPtr(boardServer),
-		Backend:      strPtr(backend),
-		BoardType:    strPtr(boardType),
-		Capabilities: store.MarshalCapabilities(capabilities),
+		SessionID:     sessionID,
+		AgentType:     agentType,
+		AgentName:     folderName,
+		WorkingDir:    absDir,
+		DisplayName:   strPtr(displayName),
+		ResumeFromID:  strPtr(resumeSessionID),
+		Flags:         store.MarshalFlags(flags),
+		Prompt:        strPtr(prompt),
+		BoardName:     strPtr(boardName),
+		BoardServer:   strPtr(boardServer),
+		Backend:       strPtr(backend),
+		BoardType:     strPtr(boardType),
+		Capabilities:  store.MarshalCapabilities(capabilities),
 		Model:         strPtr(model),
-		ContextWindow: proxy.LookupContextWindow(model),
+		ContextWindow: contextWindowForLaunch(agentType, absDir, model),
 		Tools:         store.MarshalCapabilities(tools),
-		MCPServers:   store.MarshalCapabilities(mcpServers),
-		PID:          shellPID,
+		MCPServers:    store.MarshalCapabilities(mcpServers),
+		PID:           shellPID,
 	})
 
 	if displayName != "" {
@@ -3487,13 +3517,13 @@ func (h *SessionsHandler) ResurrectTeam(w http.ResponseWriter, r *http.Request) 
 	var launched []map[string]any
 	for _, m := range members {
 		var agentCfg struct {
-			Name         string             `json:"name"`
-			Prompt       string             `json:"prompt"`
-			Capabilities *agent.Capabilities `json:"capabilities"`
-			AgentType    string             `json:"agent_type"`
-			Model        string             `json:"model"`
-			Tools        []string             `json:"tools"`
-			MCPServers   map[string]any       `json:"mcpServers"`
+			Name         string                 `json:"name"`
+			Prompt       string                 `json:"prompt"`
+			Capabilities *agent.Capabilities    `json:"capabilities"`
+			AgentType    string                 `json:"agent_type"`
+			Model        string                 `json:"model"`
+			Tools        []string               `json:"tools"`
+			MCPServers   map[string]any         `json:"mcpServers"`
 			Hooks        map[string]interface{} `json:"hooks"`
 		}
 		if err := json.Unmarshal([]byte(m.AgentConfigJSON), &agentCfg); err != nil {
@@ -3506,9 +3536,16 @@ func (h *SessionsHandler) ResurrectTeam(w http.ResponseWriter, r *http.Request) 
 		if agentType == "" {
 			agentType = "claude"
 		}
+		if agentCfg.Model == "" {
+			agentCfg.Model = agent.ConfiguredModel(agentType, workingDir)
+		}
+		var flags []string
+		if agentCfg.Model != "" {
+			flags = append(flags, "--model", agentCfg.Model)
+		}
 
 		result, err := h.launchSession(ctx, workingDir, agentType, m.AgentName,
-			"", nil, agentCfg.Prompt, team.Name, "", "", "", agentCfg.Model, agentCfg.Capabilities,
+			"", flags, agentCfg.Prompt, team.Name, "", "", "", agentCfg.Model, agentCfg.Capabilities,
 			agentCfg.Tools, agentCfg.MCPServers, agentCfg.Hooks)
 		if err != nil {
 			log.Printf("[resurrect] failed to launch %s: %v", m.AgentName, err)

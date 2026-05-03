@@ -6,6 +6,7 @@ import { renderSidebarTagDots } from './tags.js';
 import { getFolderTags, renderFolderTagPills } from './folder_tags.js';
 import { updateSectionVisibility } from './sidebar.js';
 import { syncMobileAgentList } from './mobile.js';
+import { renderHtmlWithLocalFileLinks } from './changed_files.js';
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -44,7 +45,10 @@ function _getInitials(name) {
 function _renderAvatar(s, dotClass) {
     const name = s.display_name || s.board_job_title || s.name || '';
     const color = getAgentColor(name);
-    const statusDot = `<span class="avatar-status-dot ${dotClass}"></span>`;
+    const provider = (s.agent_type || "claude").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    const modelTitle = s.model || s.agent_type || "Agent";
+    const dotTitle = `${getDotStateLabel(s)} · ${modelTitle}`;
+    const statusDot = `<span class="avatar-status-dot ${dotClass} provider-${provider}" title="${escapeAttr(dotTitle)}" aria-label="${escapeAttr(dotTitle)}"></span>`;
 
     // Custom icon takes priority
     if (s.icon && !s.sleeping) {
@@ -105,8 +109,24 @@ function getStateLabel(s) {
     if (s.sleeping) return "Sleeping";
     if (s.waiting_for_input) return "Needs input";
     if (s.stuck) return "Stuck";
-    if (s.working) return "Working";
+    if (isVisiblyWorking(s)) return "Working";
     if (s.done) return "Done";
+    return "Idle";
+}
+
+function isVisiblyWorking(s) {
+    if (s.working) return true;
+    if (s.sleeping || s.done || s.waiting_for_input || s.stuck) return false;
+    if ((s.agent_type || "").toLowerCase() !== "codex") return false;
+    const staleness = Number(s.staleness_seconds);
+    return Number.isFinite(staleness) && staleness < 30;
+}
+
+function getDotStateLabel(s) {
+    if (s.sleeping || s.done) return "Disabled";
+    if (s.waiting_for_input) return "Needs input";
+    if (s.stuck) return "Error";
+    if (isVisiblyWorking(s)) return "Working";
     return "Idle";
 }
 
@@ -154,12 +174,11 @@ function buildSessionTooltip(s) {
 }
 
 function getDotClass(s) {
-    if (s.sleeping) return "sleeping";
+    if (s.sleeping || s.done) return "disabled";
     if (s.waiting_for_input) return "waiting";
     if (s.stuck) return "stuck";
-    if (s.working) return "working";
-    if (s.done) return "done";
-    return "stale";
+    if (isVisiblyWorking(s)) return "working";
+    return "idle";
 }
 
 // ── Board accent colors (localStorage) ────────────────────────────────
@@ -1895,11 +1914,16 @@ export function renderLiveSessions(sessions) {
     // Attach drag-and-drop listeners for reordering
     _attachDragListeners(list);
 
-    // Populate team token usage (non-blocking)
+    // Populate team token usage from the currently visible live sessions.
     document.querySelectorAll('.team-token-usage[data-board]').forEach(el => {
-        getTeamTokenUsage(el.dataset.board).then(text => {
-            if (text) el.textContent = ' · ' + text;
-        });
+        const usage = getTeamTokenUsage(el.dataset.board);
+        if (!usage) {
+            el.textContent = '';
+            el.removeAttribute('title');
+            return;
+        }
+        el.textContent = ' · ' + usage.text;
+        el.title = usage.title;
     });
 
     // Sync mobile agent list
@@ -2083,6 +2107,37 @@ function stripPulseLines(text) {
     return text.replace(/^\|\|PULSE:(STATUS|SUMMARY|CONFIDENCE)\s[^\|]*\|\|$/gm, '').replace(/\n{3,}/g, '\n\n');
 }
 
+function _normalizeSubmittedMessage(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function _consumeSubmittedMessageForHistory(content) {
+    const normalized = _normalizeSubmittedMessage(content);
+    if (!normalized) return false;
+
+    const now = Date.now();
+    const pending = state.recentSubmittedMessages || [];
+    const index = pending.findIndex(entry => {
+        if (entry.session_id && state.currentSession?.session_id && entry.session_id !== state.currentSession.session_id) {
+            return false;
+        }
+        if (now - (entry.at || 0) > 60000) return false;
+
+        const target = entry.normalized || _normalizeSubmittedMessage(entry.text);
+        if (!target) return false;
+        return target === normalized || target.includes(normalized) || normalized.includes(target);
+    });
+
+    if (index === -1) {
+        state.recentSubmittedMessages = pending.filter(entry => now - (entry.at || 0) <= 60000);
+        return false;
+    }
+
+    pending.splice(index, 1);
+    state.recentSubmittedMessages = pending;
+    return true;
+}
+
 export function renderHistoryChat(messages) {
     const container = document.getElementById("history-messages");
     container.innerHTML = "";
@@ -2107,7 +2162,8 @@ export function renderHistoryChat(messages) {
         if (!content.trim()) continue;
 
         const isHuman = type === "human" || type === "user";
-        const bubbleClass = isHuman ? "human" : "assistant";
+        const submittedClass = isHuman && _consumeSubmittedMessageForHistory(content) ? " submitted-message-pulse" : "";
+        const bubbleClass = `${isHuman ? "human" : "assistant"}${submittedClass}`;
         const roleLabel = isHuman ? "You" : "Assistant";
 
         const bubble = document.createElement("div");
@@ -2115,15 +2171,16 @@ export function renderHistoryChat(messages) {
 
         let messageHtml;
         if (isHuman) {
-            messageHtml = escapeHtml(content);
+            messageHtml = renderHtmlWithLocalFileLinks(escapeHtml(content));
         } else {
             const cleaned = stripPulseLines(content);
             const rawHtml = marked.parse(cleaned);
-            messageHtml = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rawHtml) : rawHtml;
+            const sanitized = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rawHtml) : rawHtml;
+            messageHtml = renderHtmlWithLocalFileLinks(sanitized);
         }
 
         bubble.innerHTML = `
-            <div class="role-label">${roleLabel}</div>
+            <div class="role-label">${roleLabel}${submittedClass ? '<span class="submitted-message-chip">Submitted</span>' : ''}</div>
             <div class="message-text${!isHuman ? " markdown-body" : ""}">${messageHtml}</div>
             ${isHuman ? `<button class="edit-btn" onclick="editAndResubmit(this)">Edit & Resubmit</button>` : ""}
         `;
@@ -2207,18 +2264,40 @@ export async function updateHistoryTokenUsage(sessionId) {
     }
 }
 
-export async function getTeamTokenUsage(boardName) {
-    try {
-        const resp = await fetch(`/api/token-usage?board_name=${encodeURIComponent(boardName)}`);
-        if (!resp.ok) return null;
-        const data = await resp.json();
-        if (!data.totals.total_tokens || data.totals.total_tokens === 0) return null;
-        const parts = [_formatTokens(data.totals.total_tokens) + ' tokens'];
-        if (data.totals.cost_usd > 0) parts.push(_formatCost(data.totals.cost_usd));
-        return parts.join(' · ');
-    } catch {
-        return null;
+export function getTeamTokenUsage(boardName) {
+    const teamSessions = (state.liveSessions || []).filter(s => s.board_project === boardName);
+    if (teamSessions.length === 0) return null;
+
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
+    let cost = 0;
+
+    for (const s of teamSessions) {
+        input += s.token_input || 0;
+        output += s.token_output || 0;
+        cacheRead += s.token_cache_read || 0;
+        cacheWrite += s.token_cache_write || 0;
+        cost += s.token_cost_usd || 0;
     }
+
+    const total = input + output + cacheRead + cacheWrite;
+    if (total === 0 && cost === 0) return null;
+
+    const parts = [_formatTokens(total) + ' live tokens'];
+    if (cost > 0) parts.push(_formatCost(cost));
+
+    const cacheTotal = cacheRead + cacheWrite;
+    const title = [
+        'Live sessions only',
+        `Input: ${_formatTokens(input)}`,
+        `Output: ${_formatTokens(output)}`,
+        `Cache: ${_formatTokens(cacheTotal)}`,
+        `Cost: ${cost > 0 ? _formatCost(cost) : '$0.00'}`,
+    ].join(' · ');
+
+    return { text: parts.join(' · '), title };
 }
 
 export async function showTeamTokenUsage(boardName) {

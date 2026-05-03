@@ -164,7 +164,16 @@ export function connectCoralWs() {
                     updateChangedFileCount(s.changed_file_count || 0);
                     // Update terminal header status dot
                     const termDot = document.getElementById('terminal-status-dot');
-                    if (termDot) termDot.className = `terminal-status-dot ${s.working ? 'working' : s.waiting_for_input ? 'waiting' : s.sleeping ? 'sleeping' : s.done ? 'done' : 'stale'}`;
+                    if (termDot) {
+                        const provider = (s.agent_type || state.currentSession.agent_type || "claude").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+                        const recentlyActiveCodex = provider === "codex" && Number.isFinite(Number(s.staleness_seconds)) && Number(s.staleness_seconds) < 30;
+                        const statusClass = s.done || s.sleeping ? "disabled"
+                            : s.waiting_for_input ? "waiting"
+                            : s.stuck ? "stuck"
+                            : s.working || recentlyActiveCodex ? "working"
+                            : "idle";
+                        termDot.className = `terminal-status-dot ${statusClass} provider-${provider}`;
+                    }
                 }
             }
         }

@@ -231,8 +231,12 @@ func (h *SessionsHandler) buildSessionListForWS(r *http.Request) ([]map[string]a
 		if err := h.db.SelectContext(ctx, &rows, "SELECT session_id, board_name, display_name FROM live_sessions WHERE board_name IS NOT NULL AND status = 'active'"); err == nil {
 			for _, r := range rows {
 				bn, dn := "", ""
-				if r.BoardName != nil { bn = *r.BoardName }
-				if r.DisplayName != nil { dn = *r.DisplayName }
+				if r.BoardName != nil {
+					bn = *r.BoardName
+				}
+				if r.DisplayName != nil {
+					dn = *r.DisplayName
+				}
 				liveBoardNames[r.SessionID] = [2]string{bn, dn}
 			}
 		}
@@ -352,6 +356,8 @@ func (h *SessionsHandler) buildSessionListForWS(r *http.Request) ([]map[string]a
 		if usage, ok := tokenUsageMap[sid]; ok {
 			entry["token_input"] = usage.InputTokens
 			entry["token_output"] = usage.OutputTokens
+			entry["token_cache_read"] = usage.CacheReadTokens
+			entry["token_cache_write"] = usage.CacheWriteTokens
 			entry["token_cost_usd"] = usage.CostUSD
 		}
 		if cw, ok := ctxWindowMap[sid]; ok && cw > 0 {
@@ -553,4 +559,3 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-

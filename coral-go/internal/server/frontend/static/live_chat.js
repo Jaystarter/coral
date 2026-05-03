@@ -3,12 +3,109 @@
 import { state } from './state.js';
 import { escapeHtml, renderMarkdown } from './utils.js';
 import { platform } from './platform/detect.js';
+import { renderHtmlWithLocalFileLinks } from './changed_files.js';
 
 let historyPollInterval = null;
 let historyMessageCount = 0;
 let historyOffset = 0;      // pagination offset for "Load More"
 let historyHasMore = false;  // whether older messages exist
 let initialLoadDone = false; // whether the initial full load has completed
+const FOLLOW_SCROLL_GRACE_MS = 1200;
+const FOLLOW_BOTTOM_THRESHOLD = 56;
+
+function isLiveHistoryNearBottom(container, threshold = FOLLOW_BOTTOM_THRESHOLD) {
+    if (!container) return false;
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distance < threshold;
+}
+
+function scrollLiveHistoryToBottom(container, { smooth = false } = {}) {
+    if (!container) return;
+
+    state.liveHistoryProgrammaticScrollUntil = Date.now() + FOLLOW_SCROLL_GRACE_MS;
+    const useSmooth = smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const scrollToBottom = () => {
+        if (useSmooth) {
+            container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+        } else {
+            container.scrollTop = container.scrollHeight;
+        }
+    };
+
+    scrollToBottom();
+    requestAnimationFrame(scrollToBottom);
+    setTimeout(scrollToBottom, 120);
+}
+
+export function followLiveHistoryLatest({ smooth = false } = {}) {
+    state.liveHistoryAutoScroll = true;
+
+    const container = document.getElementById("live-history-messages");
+    scrollLiveHistoryToBottom(container, { smooth });
+}
+
+export function releaseLiveHistoryFollow() {
+    state.liveHistoryAutoScroll = false;
+    state.liveHistoryProgrammaticScrollUntil = 0;
+}
+
+export function updateLiveHistoryFollowFromScroll(container) {
+    if (Date.now() < (state.liveHistoryProgrammaticScrollUntil || 0)) return;
+    state.liveHistoryAutoScroll = isLiveHistoryNearBottom(container);
+}
+
+export function handleLiveHistoryScrollIntent(event) {
+    const container = event.currentTarget;
+    if (!container) return;
+
+    if (event.type === "wheel") {
+        if (event.deltaY < 0) {
+            releaseLiveHistoryFollow();
+        } else if (isLiveHistoryNearBottom(container, 96)) {
+            state.liveHistoryAutoScroll = true;
+        }
+        return;
+    }
+
+    if (event.type === "keydown") {
+        const scrollingUp = event.key === "ArrowUp"
+            || event.key === "PageUp"
+            || event.key === "Home"
+            || (event.key === " " && event.shiftKey);
+        if (scrollingUp) releaseLiveHistoryFollow();
+    }
+}
+
+function normalizeSubmittedMessage(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function consumeSubmittedMessage(content) {
+    const normalized = normalizeSubmittedMessage(content);
+    if (!normalized) return false;
+
+    const now = Date.now();
+    const pending = state.recentSubmittedMessages || [];
+    const index = pending.findIndex(entry => {
+        if (entry.session_id && state.currentSession?.session_id && entry.session_id !== state.currentSession.session_id) {
+            return false;
+        }
+        if (now - (entry.at || 0) > 60000) return false;
+
+        const target = entry.normalized || normalizeSubmittedMessage(entry.text);
+        if (!target) return false;
+        return target === normalized || target.includes(normalized) || normalized.includes(target);
+    });
+
+    if (index === -1) {
+        state.recentSubmittedMessages = pending.filter(entry => now - (entry.at || 0) <= 60000);
+        return false;
+    }
+
+    pending.splice(index, 1);
+    state.recentSubmittedMessages = pending;
+    return true;
+}
 
 
 const TOOL_ICONS = {
@@ -118,15 +215,16 @@ function renderToolCard(tool) {
 function renderMessage(msg, container) {
     if (msg.type === "user") {
         const div = document.createElement("div");
-        div.className = "chat-bubble human";
+        const submittedClass = consumeSubmittedMessage(msg.content) ? " submitted-message-pulse" : "";
+        div.className = `chat-bubble human${submittedClass}`;
         div.innerHTML = `
-            <div class="role-label">You</div>
-            <div class="message-text">${renderMarkdown(msg.content)}</div>
+            <div class="role-label">You${submittedClass ? '<span class="submitted-message-chip">Submitted</span>' : ''}</div>
+            <div class="message-text">${renderHtmlWithLocalFileLinks(renderMarkdown(msg.content))}</div>
         `;
         container.appendChild(div);
     } else if (msg.type === "assistant") {
         const tools = msg.tool_uses || [];
-        const textHtml = msg.text ? `<div class="message-text">${renderMarkdown(msg.text)}</div>` : "";
+        const textHtml = msg.text ? `<div class="message-text">${renderHtmlWithLocalFileLinks(renderMarkdown(msg.text))}</div>` : "";
         if (tools.length > 0) {
             // Text before tools (if any)
             if (textHtml) {
@@ -187,6 +285,7 @@ export async function refreshLiveHistory() {
 
     const container = document.getElementById("live-history-messages");
     if (!container) return;
+    const shouldFollowAfterRender = state.liveHistoryAutoScroll || isLiveHistoryNearBottom(container);
 
     // Show loading indicator on first load
     if (!initialLoadDone && !container.querySelector('.loading-indicator') && container.children.length === 0) {
@@ -236,8 +335,9 @@ export async function refreshLiveHistory() {
             _updateLoadMoreButton(container);
         }
 
-        if (state.autoScroll) {
-            container.scrollTop = container.scrollHeight;
+        if (shouldFollowAfterRender) {
+            state.liveHistoryAutoScroll = true;
+            scrollLiveHistoryToBottom(container);
         }
     } catch (e) {
         console.error("Failed to refresh live history:", e);
@@ -247,6 +347,7 @@ export async function refreshLiveHistory() {
 /** Load older messages (prepend above current messages). */
 export async function loadMoreHistory() {
     if (!state.currentSession || !historyHasMore) return;
+    releaseLiveHistoryFollow();
 
     const session = state.currentSession;
     const container = document.getElementById("live-history-messages");
@@ -331,4 +432,5 @@ export function resetLiveHistory() {
     historyOffset = 0;
     historyHasMore = false;
     initialLoadDone = false;
+    state.liveHistoryAutoScroll = true;
 }

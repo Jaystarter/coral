@@ -5,6 +5,8 @@ export const state = {
     coralWs: null,             // WebSocket for coral updates
     captureInterval: null,      // interval ID for auto-refreshing capture
     autoScroll: true,
+    liveHistoryAutoScroll: true,
+    liveHistoryProgrammaticScrollUntil: 0,
     isSelecting: false,         // true when user has text selected; pauses DOM updates
     liveSessions: [],           // cached live session list
     historySessionsList: [],    // cached history session list (from last paginated fetch)
@@ -17,6 +19,7 @@ export const state = {
     settings: {},               // cached global user settings from /api/settings
     prevWaitingState: {},       // tracks previous waiting_for_input per session_id for toast notifications
     killedSessions: {},         // sessionId -> session data for killed agents (preserved for history links)
+    recentSubmittedMessages: [], // recent live commands, used to accent the matching chat bubble
 };
 
 export function sessionKey(session) {

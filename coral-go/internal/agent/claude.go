@@ -126,7 +126,7 @@ func parseClaudeSessions(fpath string, mtime float64) ([]IndexedSession, error) 
 		SourceFile:     fpath,
 		FileMtime:      mtime,
 		FirstTimestamp: firstTS,
-		LastTimestamp:   lastTS,
+		LastTimestamp:  lastTS,
 		MessageCount:   msgCount,
 		DisplaySummary: strings.Join(summaryParts, " "),
 	}}, nil
@@ -431,6 +431,19 @@ func buildMergedSettings(workingDir string, agentHooks map[string]interface{}) m
 	return merged
 }
 
+func detectClaudeModel(workingDir string) string {
+	merged := buildMergedSettings(workingDir, nil)
+	if model, ok := merged["model"].(string); ok && strings.TrimSpace(model) != "" {
+		return strings.TrimSpace(model)
+	}
+	if env, ok := merged["env"].(map[string]interface{}); ok {
+		if model, ok := env["ANTHROPIC_MODEL"].(string); ok && strings.TrimSpace(model) != "" {
+			return strings.TrimSpace(model)
+		}
+	}
+	return ""
+}
+
 func readSettingsFile(path string) map[string]interface{} {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -470,7 +483,6 @@ func hookEntryExists(groups []interface{}, command string) bool {
 	}
 	return false
 }
-
 
 // BuildMergedSettingsForDetection returns the deep-merged env map from user settings files.
 // This is used by the launcher to detect the upstream provider before building the full
