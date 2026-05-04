@@ -71,6 +71,19 @@ func TestParseSessionName_BadUUIDFormat(t *testing.T) {
 	}
 }
 
+func TestIsInteractiveShell(t *testing.T) {
+	for _, cmd := range []string{"zsh", " bash ", "fish", "cmd.exe"} {
+		if !isInteractiveShell(cmd) {
+			t.Errorf("expected %q to be treated as an interactive shell", cmd)
+		}
+	}
+	for _, cmd := range []string{"codex", "node", "claude.exe", "2.1.118"} {
+		if isInteractiveShell(cmd) {
+			t.Errorf("expected %q to be treated as an agent command", cmd)
+		}
+	}
+}
+
 func TestFormatSessionName(t *testing.T) {
 	name := FormatSessionName("claude", testUUID)
 	expected := "claude-" + testUUID

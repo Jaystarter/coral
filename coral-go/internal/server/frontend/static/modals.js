@@ -623,10 +623,10 @@ function _updatePermModeDescription(selectEl) {
     if (hint) hint.textContent = PERMISSION_MODE_DESCRIPTIONS[selectEl.value] || '';
 }
 
-function _getPermFlagForAgent(agentType) {
+function _getPermFlagForAgent(agentType, modeOverride = '') {
     if (agentType === 'pi') return '';
     if (agentType === 'claude') {
-        const mode = (state.settings && state.settings.default_permission_mode) || 'bypassPermissions';
+        const mode = modeOverride || (state.settings && state.settings.default_permission_mode) || 'bypassPermissions';
         return `--permission-mode ${mode}`;
     }
     return PERM_FLAGS[agentType] || PERM_FLAGS.claude;
@@ -1811,8 +1811,10 @@ function getAgentConfig(containerId) {
     const permMode = container.querySelector('.acf-permission-mode')?.value || 'default';
     let flags = _stripPermFlags(container.querySelector('.acf-flags')?.value.trim() || '');
     if (permMode && permMode !== 'default') {
-        const permFlag = `--permission-mode ${permMode}`;
-        flags = flags ? `${flags} ${permFlag}` : permFlag;
+        const permFlag = _getPermFlagForAgent(agentType, permMode);
+        if (permFlag) {
+            flags = flags ? `${flags} ${permFlag}` : permFlag;
+        }
     }
 
     // Terminal agents never carry a model — the field is hidden in the UI.
@@ -2419,7 +2421,8 @@ async function launchTeam() {
     // Build flags from permission mode dropdown
     const flags = [];
     if (teamPermMode && teamPermMode !== 'default') {
-        flags.push('--permission-mode', teamPermMode);
+        const permFlag = _getPermFlagForAgent(agentType, teamPermMode);
+        if (permFlag) flags.push(...permFlag.split(/\s+/).filter(Boolean));
     }
 
     // Collect agent definitions

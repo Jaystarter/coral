@@ -22,12 +22,39 @@ import (
 	"github.com/cdknorow/coral/internal/store"
 )
 
+func TestStripModelFlags(t *testing.T) {
+	got := stripModelFlags([]string{
+		"--dangerously-skip-permissions",
+		"--model", "old-model",
+		"--model=new-model",
+		"-m", "short-model",
+		"-m=short-eq-model",
+		"--permission-mode", "bypassPermissions",
+		"--verbose",
+	})
+	assert.Equal(t, []string{
+		"--dangerously-skip-permissions",
+		"--permission-mode", "bypassPermissions",
+		"--verbose",
+	}, got)
+}
+
+func TestStripUnsupportedFlagsForAgent(t *testing.T) {
+	flags := []string{"--permission-mode", "bypassPermissions", "--model", "gpt-5.5", "--permission-mode=auto", "--search"}
+
+	assert.Equal(t,
+		[]string{"--model", "gpt-5.5", "--search"},
+		stripUnsupportedFlagsForAgent("codex", flags),
+	)
+	assert.Equal(t, flags, stripUnsupportedFlagsForAgent("claude", flags))
+}
+
 // mockSessionTerminal implements ptymanager.SessionTerminal for testing.
 type mockSessionTerminal struct {
-	mu              sync.Mutex
-	sessions        map[string]*ptymanager.PaneInfo
-	outputs         map[string]string
-	sent            map[string][]string
+	mu               sync.Mutex
+	sessions         map[string]*ptymanager.PaneInfo
+	outputs          map[string]string
+	sent             map[string][]string
 	killSessionCalls []string
 }
 

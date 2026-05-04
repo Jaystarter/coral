@@ -277,9 +277,13 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 
 	// User-provided flags — translate or drop Claude-specific flags
 	claudeOnlyFlags := map[string]bool{
-		"--settings": true, "--session-id": true, "--resume": true,
+		"--settings": true, "--session-id": true, "--resume": true, "--permission-mode": true,
 	}
-	for _, flag := range params.Flags {
+	claudeOnlyFlagsWithValue := map[string]bool{
+		"--settings": true, "--session-id": true, "--permission-mode": true,
+	}
+	for i := 0; i < len(params.Flags); i++ {
+		flag := params.Flags[i]
 		if flag == "--dangerously-skip-permissions" {
 			// Translate to Codex equivalent, but skip if bypass was already added
 			if !bypassSandbox {
@@ -294,6 +298,13 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 		}
 		if claudeOnlyFlags[flag] {
 			slog.Warn("dropping Claude-specific flag for Codex agent", "flag", flag)
+			if claudeOnlyFlagsWithValue[flag] && i+1 < len(params.Flags) && !strings.HasPrefix(params.Flags[i+1], "-") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(flag, "--permission-mode=") {
+			slog.Warn("dropping Claude-specific flag for Codex agent", "flag", "--permission-mode")
 			continue
 		}
 		parts = append(parts, flag)

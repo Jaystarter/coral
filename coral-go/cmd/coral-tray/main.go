@@ -30,11 +30,11 @@ import (
 	"time"
 
 	"fyne.io/systray"
-	"github.com/gen2brain/beeep"
 	"github.com/cdknorow/coral/internal/config"
 	"github.com/cdknorow/coral/internal/executil"
 	"github.com/cdknorow/coral/internal/startup"
 	"github.com/cdknorow/coral/internal/tracking"
+	"github.com/gen2brain/beeep"
 )
 
 //go:embed icon.png
@@ -270,7 +270,7 @@ func runForeground(host string, port int, noBrowser, devMode, debugMode bool, ba
 	if !noBrowser {
 		go func() {
 			time.Sleep(time.Second)
-			dashURL := fmt.Sprintf("http://localhost:%d", port)
+			dashURL := dashboardURL(port)
 			if err := launchCoralApp(dashURL); err != nil {
 				executil.OpenBrowser(dashURL)
 			}
@@ -280,7 +280,7 @@ func runForeground(host string, port int, noBrowser, devMode, debugMode bool, ba
 	// Check for updates in background
 	go checkForUpdatesOnStartup(port)
 
-	url := fmt.Sprintf("http://localhost:%d", port)
+	url := dashboardURL(port)
 
 	// Kill any orphaned coral-app from previous sessions
 	killOrphanedCoralApp()
@@ -359,6 +359,13 @@ func runForeground(host string, port int, noBrowser, devMode, debugMode bool, ba
 		httpServer.Shutdown(shutdownCtx)
 		log.Println("coral-tray exited")
 	})
+}
+
+func dashboardURL(port int) string {
+	// Use the explicit loopback origin instead of localhost so the desktop
+	// webview does not reuse stale localhost service-worker state from an
+	// older bundled app build.
+	return fmt.Sprintf("http://127.0.0.1:%d/?page=1&page_size=50&ui=atelier#agents", port)
 }
 
 // killAllAgents calls the REST API to kill all running agent sessions.
@@ -607,8 +614,6 @@ func raiseCoralApp() {
 		exec.Command("osascript", "-e", script).Run()
 	}
 }
-
-
 
 // isInsideAppBundle detects if the binary is running inside a macOS .app bundle
 // by checking if the executable path contains ".app/Contents/MacOS/".

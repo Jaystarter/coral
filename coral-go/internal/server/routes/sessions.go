@@ -171,6 +171,48 @@ func contextWindowForLaunch(agentType, workingDir, model string) int {
 	return contextWindow
 }
 
+func stripModelFlags(flags []string) []string {
+	if len(flags) == 0 {
+		return flags
+	}
+	clean := make([]string, 0, len(flags))
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		if flag == "--model" || flag == "-m" {
+			if i+1 < len(flags) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(flag, "--model=") || strings.HasPrefix(flag, "-m=") {
+			continue
+		}
+		clean = append(clean, flag)
+	}
+	return clean
+}
+
+func stripUnsupportedFlagsForAgent(agentType string, flags []string) []string {
+	if len(flags) == 0 || agentType == at.Claude {
+		return flags
+	}
+	clean := make([]string, 0, len(flags))
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		if flag == "--permission-mode" {
+			if i+1 < len(flags) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(flag, "--permission-mode=") {
+			continue
+		}
+		clean = append(clean, flag)
+	}
+	return clean
+}
+
 // NewSessionsHandler creates a SessionsHandler with the given dependencies.
 func NewSessionsHandler(db *store.DB, cfg *config.Config, backend ptymanager.TerminalBackend, terminal ptymanager.SessionTerminal, bs *board.Store) *SessionsHandler {
 	return &SessionsHandler{
@@ -1779,14 +1821,7 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		cleanFlags = append(cleanFlags, f)
 	}
 	// Also strip --model from old flags (we'll re-add from storedModel)
-	var finalFlags []string
-	for i := 0; i < len(cleanFlags); i++ {
-		if cleanFlags[i] == "--model" || cleanFlags[i] == "-m" {
-			i++ // skip the value
-			continue
-		}
-		finalFlags = append(finalFlags, cleanFlags[i])
-	}
+	finalFlags := stripModelFlags(stripUnsupportedFlagsForAgent(agentType, cleanFlags))
 	if storedModel != "" {
 		finalFlags = append(finalFlags, "--model", storedModel)
 	}
@@ -2100,9 +2135,9 @@ func (h *SessionsHandler) Launch(w http.ResponseWriter, r *http.Request) {
 	effectiveModel := h.resolveModel(r.Context(), body.AgentType, body.Model, modelDir)
 
 	// Add model flag if resolved to non-empty
-	launchFlags := body.Flags
+	launchFlags := stripUnsupportedFlagsForAgent(body.AgentType, append([]string{}, body.Flags...))
 	if effectiveModel != "" {
-		launchFlags = append(append([]string{}, body.Flags...), "--model", effectiveModel)
+		launchFlags = append(stripModelFlags(launchFlags), "--model", effectiveModel)
 	}
 	result, err := h.launchSession(r.Context(), body.WorkingDir, body.AgentType, body.DisplayName,
 		body.ResumeSessionID, launchFlags, body.Prompt, body.BoardName, body.BoardServer, body.Backend, body.BoardType, effectiveModel, body.Capabilities,
@@ -2246,10 +2281,9 @@ func (h *SessionsHandler) LaunchTeam(w http.ResponseWriter, r *http.Request) {
 		effectiveModel := defaultModelFromSettings(userSettings, agentType, agentDef.Model, workingDir)
 
 		// Build per-agent flags: start with team-level, add model if resolved
-		agentFlags := make([]string, len(body.Flags))
-		copy(agentFlags, body.Flags)
+		agentFlags := stripUnsupportedFlagsForAgent(agentType, append([]string{}, body.Flags...))
 		if effectiveModel != "" {
-			agentFlags = append(agentFlags, "--model", effectiveModel)
+			agentFlags = append(stripModelFlags(agentFlags), "--model", effectiveModel)
 		}
 
 		result, err := h.launchSession(ctx, workingDir, agentType, agentDef.Name,
@@ -2394,6 +2428,7 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		if cfg.Flags != nil && *cfg.Flags != "" {
 			json.Unmarshal([]byte(*cfg.Flags), &flags)
 		}
+		flags = stripModelFlags(stripUnsupportedFlagsForAgent(cfg.AgentType, flags))
 		prompt := ""
 		if cfg.Prompt != nil {
 			prompt = *cfg.Prompt

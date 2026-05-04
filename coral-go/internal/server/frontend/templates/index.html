@@ -40,12 +40,13 @@
     <link rel="stylesheet" href="/static/css/cost_dashboard.css">
     <link rel="stylesheet" href="/static/css/docs.css">
     <link rel="stylesheet" href="/static/css/theme-configurator.css">
-    <link rel="stylesheet" href="/static/css/atelier.css">
     <link rel="stylesheet" href="/static/css/mobile.css">
     <!-- Platform-specific CSS — loaded for all targets, scoped by class selectors -->
     <link rel="stylesheet" href="/static/css/native.css">
     <link rel="stylesheet" href="/static/css/native-macos.css">
     <link rel="stylesheet" href="/static/css/native-windows.css">
+    <!-- Atelier is the final product skin. Keep it after responsive/native layers so it wins the cascade. -->
+    <link rel="stylesheet" href="/static/css/atelier.css?v=20260504-atelier">
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons&display=swap">
     <!-- CodeMirror 6 — single IIFE bundle, sets window.CoralCM -->
     <script src="/static/vendor/codemirror/codemirror-bundle.js"></script>
@@ -307,7 +308,17 @@
     <script type="module" src="/static/app.js"></script>
     <script>
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/static/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
+            navigator.serviceWorker
+                .register('/static/sw.js?v=20260504-atelier', { scope: '/', updateViaCache: 'none' })
+                .then((registration) => registration.update().catch(() => {}))
+                .catch(() => {});
+        }
+        if ('caches' in window) {
+            caches.keys()
+                .then((names) => Promise.all(names
+                    .filter((name) => name.startsWith('coral-') && name !== 'coral-runtime-v5')
+                    .map((name) => caches.delete(name))))
+                .catch(() => {});
         }
     </script>
 </body>

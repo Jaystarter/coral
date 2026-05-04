@@ -20,6 +20,7 @@ export const state = {
     prevWaitingState: {},       // tracks previous waiting_for_input per session_id for toast notifications
     killedSessions: {},         // sessionId -> session data for killed agents (preserved for history links)
     recentSubmittedMessages: [], // recent live commands, used to accent the matching chat bubble
+    submittedTerminalCommands: {}, // per-session commands submitted in xterm, used to rehydrate "You sent" markers
 };
 
 export function sessionKey(session) {

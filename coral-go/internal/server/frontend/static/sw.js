@@ -1,9 +1,7 @@
-/* Coral Service Worker — caches app shell for fast loads */
+/* Coral Service Worker — keeps local static assets fresh during active development */
 
-const CACHE_NAME = 'coral-v3';
+const CACHE_NAME = 'coral-runtime-v5';
 const SHELL_ASSETS = [
-    '/',
-    '/static/style.css',
     '/static/favicon.png',
     '/static/coral.png',
 ];
@@ -27,15 +25,25 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
+    if (event.request.method !== 'GET' || url.origin !== self.location.origin) {
+        return;
+    }
+
     // API and WebSocket requests: always go to network
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws')) {
+        return;
+    }
+
+    // HTML is local live state. Never serve a cached app shell over current UI code.
+    if (event.request.mode === 'navigate' || event.request.headers.get('accept')?.includes('text/html')) {
+        event.respondWith(fetch(new Request(event.request, { cache: 'no-store' })));
         return;
     }
 
     // Static JS/CSS: network-first (ensures code updates load after restart)
     if (url.pathname.startsWith('/static/') && (url.pathname.endsWith('.js') || url.pathname.endsWith('.css'))) {
         event.respondWith(
-            fetch(event.request)
+            fetch(new Request(event.request, { cache: 'no-store' }))
                 .then((response) => {
                     const clone = response.clone();
                     caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
@@ -54,8 +62,5 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // HTML pages: network-first (fall back to cache for offline shell)
-    event.respondWith(
-        fetch(event.request).catch(() => caches.match('/'))
-    );
+    event.respondWith(fetch(event.request));
 });

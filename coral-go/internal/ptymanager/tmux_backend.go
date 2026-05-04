@@ -352,7 +352,11 @@ func (b *TmuxBackend) Replay(name string) ([]byte, error) {
 
 	// Fallback: log file empty or missing — use capture-pane as emergency seed
 	ctx := context.Background()
-	content, capErr := b.client.CapturePaneRawTarget(ctx, name+".0", 200)
+	target := name + ".0"
+	if resolved, findErr := b.client.FindPaneTarget(ctx, name, sess.info.AgentType, sess.info.SessionID); findErr == nil && resolved != "" {
+		target = resolved
+	}
+	content, capErr := b.client.CapturePaneRawTarget(ctx, target, 200)
 	if capErr == nil && content != "" {
 		return []byte(content), nil
 	}

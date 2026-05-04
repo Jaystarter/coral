@@ -8,16 +8,19 @@ let _currentFiles = [];
 let _searchTimeout = null;
 let _renderTimer = null;
 
-const LOCAL_PREVIEW_EXTENSIONS = [
+export const LOCAL_PREVIEW_EXTENSIONS = [
     'bash', 'c', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'html',
     'java', 'js', 'json', 'jsonl', 'jsx', 'kt', 'log', 'md', 'ndjson',
     'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'swift', 'toml', 'ts', 'tsx',
     'tsv', 'txt', 'xml', 'yaml', 'yml', 'zsh',
 ];
-const LOCAL_PREVIEW_EXT_PATTERN = LOCAL_PREVIEW_EXTENSIONS.join('|');
+export const LOCAL_PREVIEW_EXT_PATTERN = LOCAL_PREVIEW_EXTENSIONS.join('|');
 
 function _localPreviewPathRegex() {
-    return new RegExp(`(^|[\\s([{"'\`])((?:~/|/)[^\\n\\r"'<>]+?\\.(?:${LOCAL_PREVIEW_EXT_PATTERN}))(?=$|[\\s),.;:\\]\\}])`, 'gi');
+    const boundary = `(^|[\\s([{"'\`])`;
+    const pathStart = `(?:~/|/|\\.{1,2}/|[A-Za-z0-9_.-]+/)`;
+    const pathBody = `[^\\n\\r"'<>]*?\\.(?:${LOCAL_PREVIEW_EXT_PATTERN})`;
+    return new RegExp(`${boundary}(${pathStart}${pathBody})(?=$|[\\s),.;:\\]\\}])`, 'gi');
 }
 
 export function extractLocalPreviewLinks(text) {
@@ -27,6 +30,7 @@ export function extractLocalPreviewLinks(text) {
     while ((match = re.exec(text || ''))) {
         const prefix = match[1] || '';
         const filepath = match[2];
+        if (!filepath || filepath.includes('://')) continue;
         const start = match.index + prefix.length;
         links.push({ filepath, start, end: start + filepath.length });
     }
@@ -35,8 +39,12 @@ export function extractLocalPreviewLinks(text) {
 
 function _isLikelyLocalPreviewPath(value) {
     const trimmed = (value || '').trim();
-    if (!trimmed || !(trimmed.startsWith('/') || trimmed.startsWith('~/'))) return false;
+    if (!trimmed) return false;
     return extractLocalPreviewLinks(trimmed).some(link => link.filepath === trimmed);
+}
+
+function _isRelativeLocalPreviewPath(filepath) {
+    return !!filepath && !filepath.startsWith('/') && !filepath.startsWith('~/');
 }
 
 export function renderTextWithLocalFileLinks(text) {
@@ -783,7 +791,7 @@ export function openFileEdit(filepath) {
     _openInlinePane(filepath, 'edit');
 }
 
-/** Preview an absolute local artifact linked from terminal output. */
+/** Preview a local artifact linked from terminal/chat output. */
 export async function openLocalFilePreview(filepath) {
     if (!filepath) return;
 
@@ -839,6 +847,9 @@ export async function openLocalFilePreview(filepath) {
 
     try {
         const qs = new URLSearchParams({ path: filepath });
+        if (_isRelativeLocalPreviewPath(filepath) && state.currentSession?.working_directory) {
+            qs.set('base', state.currentSession.working_directory);
+        }
         const resp = await fetch(`/api/files/local-preview?${qs}`);
         const data = await resp.json().catch(() => ({}));
 

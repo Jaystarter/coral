@@ -497,14 +497,19 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 
 	defer h.backend.Unsubscribe(name, subID)
 
-	// Send replay seed as a binary frame, prefixed with clear codes so
-	// reconnects don't stack duplicate scrollback.
-	if replay, err := h.backend.Replay(name); err == nil && len(replay) > 0 {
-		clearPrefix := []byte("\x1b[2J\x1b[3J\x1b[H")
-		seed := make([]byte, len(clearPrefix)+len(replay))
-		copy(seed, clearPrefix)
-		copy(seed[len(clearPrefix):], replay)
-		conn.Write(ctx, websocket.MessageBinary, seed)
+	// Send an initial seed frame even when replay is empty. The frontend keeps
+	// the previous buffer visible until this arrives, so this frame is the
+	// authoritative handoff point to the selected pane.
+	replay, replayErr := h.backend.Replay(name)
+	if replayErr != nil && debugEnabled() {
+		slog.Info("[debug] ws/terminal replay failed", "name", name, "error", replayErr)
+	}
+	clearPrefix := []byte("\x1b[2J\x1b[3J\x1b[H")
+	seed := make([]byte, len(clearPrefix)+len(replay))
+	copy(seed, clearPrefix)
+	copy(seed[len(clearPrefix):], replay)
+	if err := conn.Write(ctx, websocket.MessageBinary, seed); err != nil {
+		return
 	}
 
 	// Reader goroutine: receives terminal input from the client (JSON text frames)

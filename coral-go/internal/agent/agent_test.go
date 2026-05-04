@@ -154,7 +154,7 @@ func TestClaude_Resume(t *testing.T) {
 
 func TestClaude_PermissionModeAllValues(t *testing.T) {
 	tests := []struct {
-		mode     string
+		mode       string
 		expectFlag bool
 	}{
 		{"plan", true},
@@ -477,6 +477,19 @@ func TestCodex_FlagTranslation(t *testing.T) {
 	cmd := a.BuildLaunchCommand(LaunchParams{Flags: []string{"--dangerously-skip-permissions"}})
 	if strings.Contains(cmd, "--dangerously-skip-permissions") || !strings.Contains(cmd, "--full-auto") {
 		t.Errorf("expected flag translation, got %q", cmd)
+	}
+}
+
+func TestCodex_DropsClaudePermissionModeFlag(t *testing.T) {
+	a := &CodexAgent{}
+	cmd := a.BuildLaunchCommand(LaunchParams{
+		Flags: []string{"--model", "gpt-5.5", "--permission-mode", "bypassPermissions", "--search"},
+	})
+	if strings.Contains(cmd, "--permission-mode") || strings.Contains(cmd, "bypassPermissions") {
+		t.Errorf("expected Claude permission-mode flag to be dropped, got %q", cmd)
+	}
+	if !strings.Contains(cmd, "--model gpt-5.5") || !strings.Contains(cmd, "--search") {
+		t.Errorf("expected unrelated Codex flags to remain, got %q", cmd)
 	}
 }
 
@@ -1448,7 +1461,7 @@ func TestBuildMergedSettings_EnvDeepMerge(t *testing.T) {
 	os.MkdirAll(globalDir, 0755)
 	globalSettings := map[string]interface{}{
 		"env": map[string]interface{}{
-			"AWS_REGION":             "us-east-1",
+			"AWS_REGION":              "us-east-1",
 			"CLAUDE_CODE_USE_BEDROCK": "1",
 		},
 	}

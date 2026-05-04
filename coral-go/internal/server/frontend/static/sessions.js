@@ -42,6 +42,7 @@ export async function selectLiveSession(name, agentType, sessionId) {
     state.currentSession = {
         type: "live", name, agent_type: agentType || null, session_id: sessionId || null,
         display_name: displayName || null, working_directory: workingDirectory || "",
+        tmux_session: agentData?.tmux_session || null,
         prompt: agentData?.prompt || "", model: agentData?.model || "",
         capabilities: agentData?.capabilities || null,
         board_project: agentData?.board_project || null,

@@ -62,6 +62,7 @@ func NewLocalFilesHandler(cfg *config.Config) *LocalFilesHandler {
 
 // Preview returns a small text file under the user's local Coral roots.
 // GET /api/files/local-preview?path=/absolute/path/file.json
+// GET /api/files/local-preview?path=relative/file.json&base=/agent/workdir
 func (h *LocalFilesHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	rawPath := strings.TrimSpace(r.URL.Query().Get("path"))
 	if rawPath == "" || strings.HasPrefix(rawPath, "-") || strings.Contains(rawPath, "\x00") {
@@ -69,7 +70,7 @@ func (h *LocalFilesHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestedPath, err := expandLocalPath(rawPath)
+	requestedPath, err := expandLocalPath(rawPath, strings.TrimSpace(r.URL.Query().Get("base")))
 	if err != nil {
 		errBadRequest(w, "invalid path")
 		return
@@ -115,7 +116,7 @@ func (h *LocalFilesHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func expandLocalPath(rawPath string) (string, error) {
+func expandLocalPath(rawPath string, basePath string) (string, error) {
 	if strings.HasPrefix(rawPath, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -123,14 +124,37 @@ func expandLocalPath(rawPath string) (string, error) {
 		}
 		rawPath = filepath.Join(home, rawPath[2:])
 	}
-	if !filepath.IsAbs(rawPath) {
+	if filepath.IsAbs(rawPath) {
+		absPath, err := filepath.Abs(rawPath)
+		if err != nil {
+			return "", err
+		}
+		return absPath, nil
+	}
+
+	candidates := make([]string, 0, 2)
+	if basePath != "" && !strings.Contains(basePath, "\x00") {
+		if baseAbs, err := expandLocalPath(basePath, ""); err == nil {
+			candidates = append(candidates, filepath.Join(baseAbs, rawPath))
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, rawPath))
+	}
+	if len(candidates) == 0 {
 		return "", os.ErrInvalid
 	}
-	absPath, err := filepath.Abs(rawPath)
-	if err != nil {
-		return "", err
+
+	for _, candidate := range candidates {
+		absPath, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(absPath); err == nil {
+			return absPath, nil
+		}
 	}
-	return absPath, nil
+	return filepath.Abs(candidates[0])
 }
 
 func (h *LocalFilesHandler) isAllowedLocalPath(fullPath string) bool {

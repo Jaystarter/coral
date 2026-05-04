@@ -59,7 +59,18 @@ func (r *TmuxRuntime) SendInput(ctx context.Context, name, text string) error {
 	// Parse agent type and session ID from name format "{type}-{uuid}"
 	agentType, sessionID := parseSessionName(name)
 	agentName := name
-	return r.client.SendKeys(ctx, agentName, text, agentType, sessionID)
+	target, err := r.client.FindPaneTarget(ctx, agentName, agentType, sessionID)
+	if err != nil {
+		return err
+	}
+	if target == "" {
+		return fmt.Errorf("pane %q not found in any tmux session", agentName)
+	}
+	currentCommand, _ := r.client.DisplayMessage(ctx, target, "#{pane_current_command}")
+	if isInteractiveShell(currentCommand) {
+		return fmt.Errorf("not sending input to %q because pane is at shell %q", name, strings.TrimSpace(currentCommand))
+	}
+	return r.client.SendKeysToTarget(ctx, target, text)
 }
 
 func (r *TmuxRuntime) KillAgent(ctx context.Context, name string) error {
@@ -87,6 +98,15 @@ func parseSessionName(name string) (agentType, sessionID string) {
 		return parts[0], parts[1]
 	}
 	return "", ""
+}
+
+func isInteractiveShell(command string) bool {
+	switch strings.ToLower(strings.TrimSpace(command)) {
+	case "sh", "bash", "zsh", "fish", "ksh", "dash", "pwsh", "powershell", "cmd", "cmd.exe":
+		return true
+	default:
+		return false
+	}
 }
 
 // DiscoverAgentsFromTmux finds coral agents by scanning tmux sessions.
