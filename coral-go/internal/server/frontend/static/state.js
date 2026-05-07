@@ -13,6 +13,7 @@ export const state = {
     currentCommands: {},        // commands for current session's agent type
     sessionInputText: {},       // per-session draft text: { "sessionKey": "partial text" }
     currentAgentTasks: [],      // tasks for the currently selected live agent
+    currentBoardTasks: [],      // board tasks for the currently selected live agent's team
     currentAgentNotes: [],      // user notes for the currently selected live agent
     currentAgentEvents: [],     // events for the currently selected live agent
     eventFiltersHidden: null,   // Set of hidden filter keys (lazily initialized)

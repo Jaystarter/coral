@@ -47,6 +47,7 @@
     <link rel="stylesheet" href="/static/css/native-windows.css">
     <!-- Atelier is the final product skin. Keep it after responsive/native layers so it wins the cascade. -->
     <link rel="stylesheet" href="/static/css/atelier.css?v=20260504-atelier">
+    <link rel="stylesheet" href="/static/css/mission_canvas.css?v=20260505-canvas">
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons&display=swap">
     <!-- CodeMirror 6 — single IIFE bundle, sets window.CoralCM -->
     <script src="/static/vendor/codemirror/codemirror-bundle.js"></script>
@@ -76,6 +77,7 @@
         </div>
         <nav class="top-nav-tabs" role="tablist" aria-label="Main navigation">
             <button class="top-nav-tab active" id="nav-tab-agents" onclick="switchNavTab('agents')">Agents</button>
+            <button class="top-nav-tab" id="nav-tab-canvas" onclick="switchNavTab('canvas')">Canvas</button>
             <button class="top-nav-tab" id="nav-tab-workflows" onclick="switchNavTab('workflows')">Workflows</button>
             <button class="top-nav-tab" id="nav-tab-jobs" onclick="switchNavTab('jobs')">Jobs</button>
             <button class="top-nav-tab" id="nav-tab-tokens" onclick="switchNavTab('tokens')">Tokens</button>
@@ -248,6 +250,37 @@
             </div>
 
             {{ template "includes/views/live_session.html" . }}
+
+            <div id="agent-canvas-view" class="agent-canvas-view" style="display:none">
+                <header class="agent-canvas-header">
+                    <div class="agent-canvas-titleblock">
+                        <span class="agent-canvas-kicker">Flow atlas</span>
+                        <h2>Trace every branch.</h2>
+                        <p>Map board messages, mentions, tasks, and handoffs as a navigable operations graph.</p>
+                    </div>
+                    <div class="agent-canvas-controls" aria-label="Canvas controls">
+                        <label class="agent-canvas-select-wrap">
+                            <span>Scope</span>
+                            <select id="agent-canvas-team-filter" class="agent-canvas-select" aria-label="Filter canvas by team">
+                                <option value="all">All Teams</option>
+                            </select>
+                        </label>
+                        <button type="button" id="agent-canvas-fit" class="agent-canvas-control-btn">
+                            <span class="material-icons">center_focus_strong</span>
+                            Fit
+                        </button>
+                        <button type="button" id="agent-canvas-flow-toggle" class="agent-canvas-control-btn is-active" aria-pressed="true">
+                            <span class="material-icons">timeline</span>
+                            Show Flow
+                        </button>
+                        <button type="button" id="agent-canvas-motion-toggle" class="agent-canvas-control-btn" aria-pressed="false">
+                            <span class="material-icons">motion_photos_off</span>
+                            Reduce Motion
+                        </button>
+                    </div>
+                </header>
+                <section id="agent-canvas-stage" class="agent-canvas-stage" aria-live="polite"></section>
+            </div>
 
             {{ template "includes/views/history_session.html" . }}
 

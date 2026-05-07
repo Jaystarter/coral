@@ -38,6 +38,7 @@ export async function selectLiveSession(name, agentType, sessionId) {
     const agentData = state.liveSessions.find(s => s.session_id === sessionId);
     const displayName = agentData ? agentData.display_name : null;
     const workingDirectory = agentData ? agentData.working_directory : "";
+    const mode = getRendererMode(agentType, sessionId);
 
     state.currentSession = {
         type: "live", name, agent_type: agentType || null, session_id: sessionId || null,
@@ -105,13 +106,23 @@ export async function selectLiveSession(name, agentType, sessionId) {
     updateWaitingIndicator(agent || {});
     updateTokenUsage(sessionId);
 
-    // Fetch full detail in background (non-blocking) for pane capture
-    loadLiveSessionDetail(name, agentType, sessionId).then(detail => {
-        if (detail && detail.pane_capture) {
-            const paneCapture = document.getElementById("pane-capture");
-            if (paneCapture) paneCapture.innerHTML = renderTextWithLocalFileLinks(detail.pane_capture);
+    // Fetch full detail in background only when the semantic capture pane is visible.
+    // Xterm sessions get their replay over websocket; rendering the hidden capture
+    // DOM during a switch is duplicate work and noticeably stalls WebKit.
+    if (mode !== "xterm" || typeof Terminal === 'undefined') {
+        loadLiveSessionDetail(name, agentType, sessionId).then(detail => {
+            if (detail && detail.pane_capture) {
+                const paneCapture = document.getElementById("pane-capture");
+                if (paneCapture) paneCapture.innerHTML = renderTextWithLocalFileLinks(detail.pane_capture);
+            }
+        });
+    } else {
+        const paneCapture = document.getElementById("pane-capture");
+        if (paneCapture) {
+            paneCapture.replaceChildren();
+            paneCapture._lastCapture = "";
         }
-    });
+    }
 
     // Show sleeping overlay if agent is sleeping
     const sleepOverlay = document.getElementById('session-sleeping-overlay');
@@ -155,7 +166,6 @@ export async function selectLiveSession(name, agentType, sessionId) {
     state.currentAgentTasks = [];
     state.currentBoardTasks = [];
     renderTaskList();
-    const mode = getRendererMode(agentType, sessionId);
     dbg('renderer mode:', mode, 'Terminal available:', typeof Terminal !== 'undefined');
     // Always start capture refresh — it polls tasks and events for any mode
     startCaptureRefresh();

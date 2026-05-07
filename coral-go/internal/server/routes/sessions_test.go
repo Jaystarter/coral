@@ -616,6 +616,7 @@ func setupSessionsTestServerWithConfig(t *testing.T, cfg *config.Config) (*httpt
 	r.Post("/api/sessions/live/{name}/set-icon", handler.SetIcon)
 	r.Post("/api/sessions/launch", handler.Launch)
 	r.Post("/api/sessions/launch-team", handler.LaunchTeam)
+	r.Post("/api/sessions/live/team/{boardName}/reset", handler.ResetTeam)
 
 	// Task routes
 	r.Get("/api/sessions/live/{name}/tasks", handler.ListTasks)
@@ -636,6 +637,94 @@ func setupSessionsTestServerWithConfig(t *testing.T, cfg *config.Config) (*httpt
 	t.Cleanup(server.Close)
 
 	return server, handler, terminal, ss
+}
+
+func TestResetTeamRelaunchesAgentsAndPreservesBackend(t *testing.T) {
+	server, _, terminal, ss := setupSessionsTestServer(t)
+	ctx := context.Background()
+	boardName := "Reset Board"
+	displayName := "Reset Agent"
+	workDir := t.TempDir()
+
+	require.NoError(t, ss.RegisterLiveSession(ctx, &store.LiveSession{
+		SessionID:    "old-reset-session",
+		AgentType:    "terminal",
+		AgentName:    "old-reset-pane",
+		WorkingDir:   workDir,
+		DisplayName:  strPtr(displayName),
+		Flags:        store.MarshalFlags([]string{"--model", "old-model", "--search"}),
+		Prompt:       strPtr("original prompt"),
+		BoardName:    strPtr(boardName),
+		BoardServer:  strPtr("local"),
+		Backend:      strPtr("tmux"),
+		BoardType:    strPtr("team"),
+		Icon:         strPtr("*"),
+		Model:        strPtr("stored-model"),
+		MCPServers:   store.MarshalCapabilities(map[string]any{"local": map[string]any{"command": "echo"}}),
+		Capabilities: store.MarshalCapabilities(map[string]bool{"read": true}),
+	}))
+
+	resp, err := http.Post(server.URL+"/api/sessions/live/team/Reset%20Board/reset", "application/json", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		OK     bool             `json:"ok"`
+		Agents []map[string]any `json:"agents"`
+		Errors []map[string]any `json:"errors"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.True(t, body.OK)
+	require.Len(t, body.Agents, 1)
+	require.Empty(t, body.Errors)
+
+	sessions, err := ss.GetBoardSessions(ctx, boardName)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.NotEqual(t, "old-reset-session", sessions[0].SessionID)
+	require.NotNil(t, sessions[0].Backend)
+	assert.Equal(t, "tmux", *sessions[0].Backend)
+	require.NotNil(t, sessions[0].Icon)
+	assert.Equal(t, "*", *sessions[0].Icon)
+	require.NotNil(t, sessions[0].Model)
+	assert.Equal(t, "stored-model", *sessions[0].Model)
+	require.NotNil(t, sessions[0].Flags)
+	assert.Contains(t, *sessions[0].Flags, "stored-model")
+	assert.NotContains(t, *sessions[0].Flags, "old-model")
+	assert.Contains(t, terminal.killSessionCalls, "old-reset-pane")
+}
+
+func TestResetTeamReportsRelaunchFailures(t *testing.T) {
+	server, _, _, ss := setupSessionsTestServer(t)
+	ctx := context.Background()
+	boardName := "Broken Reset Board"
+
+	require.NoError(t, ss.RegisterLiveSession(ctx, &store.LiveSession{
+		SessionID:   "old-broken-reset-session",
+		AgentType:   "terminal",
+		AgentName:   "old-broken-reset-pane",
+		WorkingDir:  t.TempDir() + "/missing",
+		DisplayName: strPtr("Broken Agent"),
+		BoardName:   strPtr(boardName),
+		Backend:     strPtr("tmux"),
+	}))
+
+	resp, err := http.Post(server.URL+"/api/sessions/live/team/Broken%20Reset%20Board/reset", "application/json", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	var body struct {
+		OK     bool             `json:"ok"`
+		Agents []map[string]any `json:"agents"`
+		Errors []map[string]any `json:"errors"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.False(t, body.OK)
+	require.Empty(t, body.Agents)
+	require.Len(t, body.Errors, 1)
+	assert.Equal(t, "Broken Agent", body.Errors[0]["name"])
 }
 
 // ── Edition Limits Tests ────────────────────────────────────────────────

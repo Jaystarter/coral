@@ -45,6 +45,11 @@ export function initRouter() {
     // Set initial state without pushing
     if (!window.location.hash) {
         replaceView('agents');
+    } else {
+        const initial = _parseHash(window.location.hash);
+        if (initial.view === 'canvas') {
+            _restoreView(initial.view, { view: initial.view, ...initial.params });
+        }
     }
 }
 
@@ -55,6 +60,13 @@ function _restoreView(view, params) {
         case 'agents':
             if (isMobile && window.switchMobileTab) {
                 window.switchMobileTab('agents');
+            } else if (window.switchNavTab) {
+                window.switchNavTab('agents');
+            }
+            break;
+        case 'canvas':
+            if (window.switchNavTab) {
+                window.switchNavTab('canvas');
             }
             break;
         case 'chat':

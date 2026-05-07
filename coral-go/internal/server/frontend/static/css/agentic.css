@@ -787,6 +787,10 @@
 /* ── Board Tasks ──────────────────────────────────────────── */
 
 .board-tasks-section {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
     border-top: 1px solid var(--border);
     margin-top: 4px;
     overflow-y: auto;
@@ -858,8 +862,63 @@
 
 .board-task-list {
     display: flex;
+    flex: 1;
     flex-direction: column;
+    min-height: 0;
     overflow-y: auto;
+}
+
+.board-task-state {
+    display: flex;
+    flex: 1;
+    min-height: 220px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 30px 22px;
+    text-align: center;
+    color: var(--text-muted);
+    background:
+        radial-gradient(circle at 50% 30%, color-mix(in oklch, var(--accent) 10%, transparent), transparent 42%),
+        linear-gradient(180deg, color-mix(in oklch, var(--bg-tertiary) 36%, transparent), transparent 70%);
+}
+
+.board-task-state-icon {
+    display: inline-flex;
+    width: 42px;
+    height: 42px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in oklch, var(--accent) 24%, var(--border));
+    border-radius: 14px;
+    color: var(--accent-light);
+    background: color-mix(in oklch, var(--accent) 10%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklch, var(--text-primary) 8%, transparent);
+}
+
+.board-task-state-title {
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.board-task-state-body {
+    max-width: 290px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.board-task-state-action {
+    margin-top: 4px;
+}
+
+.board-task-state-error .board-task-state-icon {
+    border-color: color-mix(in oklch, var(--error) 36%, var(--border));
+    color: var(--error);
+    background: color-mix(in oklch, var(--error) 10%, transparent);
 }
 
 .board-task-item {

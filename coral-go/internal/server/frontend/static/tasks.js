@@ -7,6 +7,11 @@ import { escapeHtml, escapeAttr, showToast } from './utils.js';
 let _boardTaskPollTimer = null;
 // Live cost cache: taskID → { cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, request_count }
 let _liveCosts = {};
+let _boardTaskRequestSeq = 0;
+let _agentTaskRequestSeq = 0;
+let _boardTasksLoading = false;
+let _boardTasksError = '';
+let _boardTasksBoardName = '';
 
 export function startBoardTaskPoll() {
     stopBoardTaskPoll();
@@ -57,15 +62,19 @@ async function _fetchLiveCosts(boardProject) {
 
 export async function loadAgentTasks(agentName, sessionId) {
     if (!agentName) return;
+    const requestSeq = ++_agentTaskRequestSeq;
+    const expectedSessionId = sessionId || (state.currentSession && state.currentSession.session_id) || '';
     try {
         const params = new URLSearchParams();
-        const sid = sessionId || (state.currentSession && state.currentSession.session_id);
+        const sid = expectedSessionId;
         if (sid) params.set("session_id", sid);
         const qs = params.toString() ? `?${params}` : "";
         const resp = await fetch(`/api/sessions/live/${encodeURIComponent(agentName)}/tasks${qs}`);
         if (!resp.ok) throw new Error(`tasks fetch failed: ${resp.status}`);
+        if (_isStaleAgentTaskResponse(requestSeq, agentName, expectedSessionId)) return;
         state.currentAgentTasks = await resp.json();
     } catch (e) {
+        if (_isStaleAgentTaskResponse(requestSeq, agentName, expectedSessionId)) return;
         state.currentAgentTasks = [];
     }
     renderTaskList();
@@ -207,18 +216,35 @@ function initTaskDragReorder() {
 /* ── Board Tasks ────────────────────────────────────────── */
 
 export async function loadBoardTasks(boardName) {
+    const normalizedBoardName = boardName || '';
+    const requestSeq = ++_boardTaskRequestSeq;
+    _boardTasksBoardName = normalizedBoardName;
+    _boardTasksError = '';
+
     if (!boardName) {
+        _boardTasksLoading = false;
         state.currentBoardTasks = [];
         renderBoardTaskList();
         return;
     }
+
+    _boardTasksLoading = true;
+    renderBoardTaskList();
+
     try {
         const resp = await fetch(`/api/board/${encodeURIComponent(boardName)}/tasks`);
         if (!resp.ok) throw new Error(`board tasks fetch failed: ${resp.status}`);
         const data = await resp.json();
+        if (_isStaleBoardTaskResponse(requestSeq, normalizedBoardName)) return;
         state.currentBoardTasks = data.tasks || [];
     } catch (e) {
+        if (_isStaleBoardTaskResponse(requestSeq, normalizedBoardName)) return;
         state.currentBoardTasks = [];
+        _boardTasksError = e && e.message ? e.message : 'Failed to load tasks';
+    } finally {
+        if (!_isStaleBoardTaskResponse(requestSeq, normalizedBoardName)) {
+            _boardTasksLoading = false;
+        }
     }
     renderBoardTaskList();
 }
@@ -247,6 +273,24 @@ function _toggleHideCompleted() {
 // Expose globally
 window._toggleTaskSort = _toggleTaskSort;
 window._toggleHideCompleted = _toggleHideCompleted;
+
+function _currentBoardProject() {
+    if (!state.currentSession) return '';
+    return state.currentSession.board_project || state.currentSession.name || '';
+}
+window._currentBoardProjectForTasks = _currentBoardProject;
+
+function _isStaleBoardTaskResponse(requestSeq, boardName) {
+    return requestSeq !== _boardTaskRequestSeq || boardName !== _currentBoardProject();
+}
+
+function _isStaleAgentTaskResponse(requestSeq, agentName, sessionId) {
+    if (requestSeq !== _agentTaskRequestSeq) return true;
+    if (!state.currentSession) return true;
+    if (state.currentSession.name !== agentName) return true;
+    const currentSessionId = state.currentSession.session_id || '';
+    return sessionId && currentSessionId && sessionId !== currentSessionId;
+}
 
 const _priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -282,6 +326,8 @@ function _formatTaskTime(ts) {
 export function renderBoardTaskList() {
     const container = document.getElementById('board-task-list');
     if (!container) return;
+    const section = document.getElementById('board-tasks-section');
+    if (section) section.style.display = '';
 
     // Merge board tasks and agent tasks into a unified list
     const boardTasks = (state.currentBoardTasks || []).map(t => ({ ...t, _source: 'board' }));
@@ -318,15 +364,6 @@ export function renderBoardTaskList() {
         }
         return _taskSortAsc ? cmp : -cmp;
     });
-    const section = document.getElementById('board-tasks-section');
-
-    if (allTasks.length === 0) {
-        if (section) section.style.display = 'none';
-        const countEl = document.getElementById('task-bar-count');
-        if (countEl) countEl.textContent = '';
-        return;
-    }
-    if (section) section.style.display = '';
 
     const arrow = (field) => _taskSortField === field ? (_taskSortAsc ? ' ▲' : ' ▼') : '';
 
@@ -342,6 +379,49 @@ export function renderBoardTaskList() {
     const headerLabel = section ? section.querySelector('.board-tasks-header > span:first-child') : null;
     if (headerLabel) headerLabel.textContent = 'Tasks';
 
+    const countEl = document.getElementById('task-bar-count');
+    if (countEl) {
+        const doneCount = allTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
+        countEl.textContent = allTasks.length > 0 ? `${doneCount}/${allTasks.length}` : '';
+    }
+
+    if (_boardTasksLoading && allTasks.length === 0) {
+        container.innerHTML = _renderTaskState({
+            icon: 'hourglass_top',
+            title: 'Loading tasks',
+            body: _boardTasksBoardName
+                ? `Reading board tasks for ${escapeHtml(_boardTasksBoardName)}.`
+                : 'Reading the current agent task list.',
+        });
+        return;
+    }
+
+    if (_boardTasksError && allTasks.length === 0) {
+        container.innerHTML = _renderTaskState({
+            icon: 'warning',
+            title: 'Tasks unavailable',
+            body: escapeHtml(_boardTasksError),
+            tone: 'error',
+            action: '<button class="btn btn-sm" onclick="loadBoardTasks(window._currentBoardProjectForTasks())">Retry</button>',
+        });
+        return;
+    }
+
+    if (allTasks.length === 0) {
+        const boardName = _currentBoardProject();
+        container.innerHTML = _renderTaskState({
+            icon: 'checklist',
+            title: 'No tasks yet',
+            body: boardName
+                ? `No board or agent tasks are currently assigned for ${escapeHtml(boardName)}.`
+                : 'Select a live agent to inspect board and local tasks.',
+            action: boardName
+                ? '<button class="btn btn-sm" onclick="showCreateTaskModal()">Create task</button>'
+                : '',
+        });
+        return;
+    }
+
     const header = `
         <div class="board-task-item board-task-header">
             <span class="board-task-status-col"></span>
@@ -352,6 +432,16 @@ export function renderBoardTaskList() {
             <span class="board-task-cost board-task-sort" onclick="_toggleTaskSort('cost')">Cost${arrow('cost')}</span>
             <span class="board-task-time board-task-sort" onclick="_toggleTaskSort('created_at')">Created${arrow('created_at')}</span>
         </div>`;
+
+    if (tasks.length === 0) {
+        container.innerHTML = header + _renderTaskState({
+            icon: 'visibility_off',
+            title: 'All tasks are hidden',
+            body: 'Completed tasks are hidden by the current filter.',
+            action: '<button class="btn btn-sm" onclick="_toggleHideCompleted()">Show done</button>',
+        });
+        return;
+    }
 
     const rows = tasks.map(t => {
         const isAgent = t._source === 'agent';
@@ -404,13 +494,16 @@ export function renderBoardTaskList() {
     }).join('');
 
     container.innerHTML = header + rows;
+}
 
-    // Update task count badge
-    const countEl = document.getElementById('task-bar-count');
-    if (countEl) {
-        const doneCount = allTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
-        countEl.textContent = allTasks.length > 0 ? `${doneCount}/${allTasks.length}` : '';
-    }
+function _renderTaskState({ icon, title, body, tone = '', action = '' }) {
+    return `
+        <div class="board-task-state ${tone ? `board-task-state-${tone}` : ''}">
+            <span class="material-icons board-task-state-icon">${escapeHtml(icon)}</span>
+            <div class="board-task-state-title">${escapeHtml(title)}</div>
+            <div class="board-task-state-body">${body}</div>
+            ${action ? `<div class="board-task-state-action">${action}</div>` : ''}
+        </div>`;
 }
 
 /* ── Dependency Picker ─────────────────────────────────── */

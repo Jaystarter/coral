@@ -122,6 +122,43 @@ func TestTmuxBackend_Replay(t *testing.T) {
 	t.Errorf("expected replay to contain MARKER_REPLAY_42, got: %q", content)
 }
 
+func TestNormalizeCapturePaneReplay_CollapsesLargeBlankRuns(t *testing.T) {
+	input := strings.Join([]string{
+		"service availability, not the debug_as_user permission.",
+		"",
+		"\x1b[0m   ",
+		"",
+		"",
+		"",
+		"",
+		"› Implement {feature}",
+	}, "\n")
+
+	got := string(normalizeCapturePaneReplay(input))
+	got = strings.ReplaceAll(got, "\r\n", "\n")
+	lines := strings.Split(got, "\n")
+
+	maxBlankRun := 0
+	blankRun := 0
+	for _, line := range lines {
+		if isReplayBlankLine(line) {
+			blankRun++
+			if blankRun > maxBlankRun {
+				maxBlankRun = blankRun
+			}
+			continue
+		}
+		blankRun = 0
+	}
+
+	if maxBlankRun != maxReplayBlankRun {
+		t.Fatalf("expected max blank run %d, got %d in %q", maxReplayBlankRun, maxBlankRun, got)
+	}
+	if !strings.Contains(got, "service availability") || !strings.Contains(got, "› Implement {feature}") {
+		t.Fatalf("expected non-blank replay content to remain, got %q", got)
+	}
+}
+
 func TestTmuxBackend_SendInput(t *testing.T) {
 	b := newTestTmuxBackend(t)
 

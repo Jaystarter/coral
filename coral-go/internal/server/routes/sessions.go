@@ -697,11 +697,15 @@ func (h *SessionsHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	agentType := r.URL.Query().Get("agent_type")
 	sessionID := r.URL.Query().Get("session_id")
+	includeCapture := r.URL.Query().Get("include_capture") != "false"
 
 	logPath := h.findLogPath(agentType, sessionID)
 	logInfo := getLogStatus(logPath)
 
-	paneText, _ := h.terminal.CaptureOutput(r.Context(), name, 200, agentType, sessionID)
+	paneText := ""
+	if includeCapture {
+		paneText, _ = h.terminal.CaptureOutput(r.Context(), name, 200, agentType, sessionID)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":              name,
@@ -736,6 +740,7 @@ func (h *SessionsHandler) Poll(w http.ResponseWriter, r *http.Request) {
 	agentType := r.URL.Query().Get("agent_type")
 	sessionID := r.URL.Query().Get("session_id")
 	eventsLimit := queryInt(r, "events_limit", 50)
+	includeCapture := r.URL.Query().Get("include_capture") != "false"
 	if eventsLimit > 200 {
 		eventsLimit = 200
 	}
@@ -744,10 +749,12 @@ func (h *SessionsHandler) Poll(w http.ResponseWriter, r *http.Request) {
 
 	// Capture pane
 	captureResult := map[string]any{"name": name, "capture": nil}
-	if text, err := h.terminal.CaptureOutput(ctx, name, 200, agentType, sessionID); err == nil && text != "" {
-		captureResult["capture"] = text
-	} else {
-		captureResult["error"] = fmt.Sprintf("Could not capture pane for '%s'", name)
+	if includeCapture {
+		if text, err := h.terminal.CaptureOutput(ctx, name, 200, agentType, sessionID); err == nil && text != "" {
+			captureResult["capture"] = text
+		} else {
+			captureResult["error"] = fmt.Sprintf("Could not capture pane for '%s'", name)
+		}
 	}
 
 	// Tasks
@@ -2370,6 +2377,7 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		Flags        *string
 		Prompt       *string
 		BoardServer  *string
+		Backend      *string
 		BoardType    *string
 		Icon         *string
 		Capabilities *string
@@ -2393,6 +2401,7 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 			Flags:        s.Flags,
 			Prompt:       s.Prompt,
 			BoardServer:  s.BoardServer,
+			Backend:      s.Backend,
 			BoardType:    s.BoardType,
 			Icon:         s.Icon,
 			Capabilities: s.Capabilities,
@@ -2423,6 +2432,7 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 
 	// Re-launch each agent with original config
 	var launched []map[string]any
+	var failures []map[string]any
 	for _, cfg := range configs {
 		var flags []string
 		if cfg.Flags != nil && *cfg.Flags != "" {
@@ -2436,6 +2446,10 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		boardServer := ""
 		if cfg.BoardServer != nil {
 			boardServer = *cfg.BoardServer
+		}
+		backend := ""
+		if cfg.Backend != nil {
+			backend = *cfg.Backend
 		}
 		boardType := ""
 		if cfg.BoardType != nil {
@@ -2466,17 +2480,26 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		tools := store.UnmarshalFlags(cfg.Tools)
 		mcpServers := store.UnmarshalMCPServers(cfg.MCPServers)
 		result, err := h.launchSession(bgCtx, cfg.WorkingDir, cfg.AgentType, displayName,
-			"", flags, prompt, boardName, boardServer, "", boardType, modelStr, caps,
+			"", flags, prompt, boardName, boardServer, backend, boardType, modelStr, caps,
 			tools, mcpServers, nil)
 		if err != nil {
 			log.Printf("[reset-team] failed to re-launch %s: %v", displayName, err)
-			launched = append(launched, map[string]any{"name": displayName, "error": err.Error()})
+			failures = append(failures, map[string]any{
+				"name":       displayName,
+				"agent_type": cfg.AgentType,
+				"error":      err.Error(),
+			})
 			continue
 		}
 
 		// Re-setup board subscription
 		h.setupBoardAndPrompt(result["session_id"].(string), result["session_name"].(string),
 			cfg.AgentType, boardName, displayName)
+		if cfg.Icon != nil {
+			if err := h.ss.SetIcon(bgCtx, result["session_id"].(string), cfg.Icon); err != nil {
+				log.Printf("[reset-team] failed to restore icon for %s: %v", displayName, err)
+			}
+		}
 
 		launched = append(launched, map[string]any{
 			"name":         displayName,
@@ -2498,8 +2521,17 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("[reset-team] reset board %q: %d agents", boardName, len(launched))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "board": boardName, "agents": launched})
+	log.Printf("[reset-team] reset board %q: %d agents launched, %d failures", boardName, len(launched), len(failures))
+	status := http.StatusOK
+	if len(launched) == 0 && len(failures) > 0 {
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, map[string]any{
+		"ok":     len(failures) == 0,
+		"board":  boardName,
+		"agents": launched,
+		"errors": failures,
+	})
 }
 
 // ── Tasks ───────────────────────────────────────────────────────────────

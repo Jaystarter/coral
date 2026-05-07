@@ -181,6 +181,13 @@ function getDotClass(s) {
     return "idle";
 }
 
+function _emitLiveSessionsRendered(sessions) {
+    if (typeof window === 'undefined' || typeof CustomEvent === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('coral:live-sessions-rendered', {
+        detail: { sessions: sessions || [] },
+    }));
+}
+
 // ── Board accent colors (localStorage) ────────────────────────────────
 
 function _getBoardColor(boardName) {
@@ -1491,6 +1498,7 @@ export function renderLiveSessions(sessions) {
 
     if (!sessions.length) {
         list.innerHTML = '<li class="empty-state">No live sessions</li>';
+        _emitLiveSessionsRendered(sessions);
         return;
     }
 
@@ -1500,15 +1508,41 @@ export function renderLiveSessions(sessions) {
     if (check) check.style.opacity = groupByTeam ? '1' : '0.2';
 
     // Helper to generate a deterministic accent color from a string
-    function _boardAccentColor(name) {
+    function _boardAccentColor(name, index = 0) {
         // Check for user-set accent color first
         const custom = _getBoardColor(name);
         if (custom) return custom;
-        // Default: hash-based color
+        // Default: choose from Coral's cool operational palette. A full hue hash
+        // can land on orange/brown, which fights the Mission Atelier skin.
         let hash = 0;
         for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
-        const hue = ((hash % 360) + 360) % 360;
-        return `hsl(${hue}, 60%, 55%)`;
+        const palette = [
+            'oklch(0.74 0.118 202)', // signal cyan
+            'oklch(0.72 0.132 155)', // reef green
+            'oklch(0.68 0.135 292)', // violet agent
+            'oklch(0.73 0.09 232)',  // tempered blue
+            'oklch(0.70 0.08 178)',  // deep teal
+            'oklch(0.70 0.09 270)',  // slate violet
+        ];
+        return palette[(Math.abs(hash) + index) % palette.length];
+    }
+
+    function _teamRoomCrest(name) {
+        const words = String(name || '')
+            .replace(/[^a-z0-9]+/gi, ' ')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean);
+        const stopWords = new Set(['the', 'and', 'room']);
+        const significant = words.filter(w => !stopWords.has(w.toLowerCase()) && !(w.toLowerCase() === 'team' && words.length > 2));
+        const picked = significant.length >= 2 ? significant : words;
+        if (picked.length >= 2) return `${picked[0][0]}${picked[1][0]}`.toUpperCase();
+        if (picked.length === 1) return picked[0].slice(0, 2).toUpperCase();
+        return 'TM';
+    }
+
+    function _teamRoomNumber(index) {
+        return String(index + 1).padStart(2, '0');
     }
 
     let html = "";
@@ -1549,8 +1583,10 @@ export function renderLiveSessions(sessions) {
         });
     }
 
-    for (const [boardName, boardSessions] of teamEntries) {
-        const accentColor = _boardAccentColor(boardName);
+    for (const [boardIndex, [boardName, boardSessions]] of teamEntries.entries()) {
+        const accentColor = _boardAccentColor(boardName, boardIndex);
+        const roomNumber = _teamRoomNumber(boardIndex);
+        const roomCrest = _teamRoomCrest(boardName);
         const boardCollapsed = _isGroupCollapsed(boardName);
         const bChevron = boardCollapsed ? '&#x25B8;' : '&#x25BE;';
         const boardLink = '';
@@ -1621,9 +1657,9 @@ export function renderLiveSessions(sessions) {
         const teamDirLine = boardWorkDir ? `<div class="board-card-dir" title="${escapeAttr(boardWorkDir)}"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8L6.5 3H3a1 1 0 0 0-1 1z"/></svg> ${escapeHtml(_shortPath(boardWorkDir, 3))}</div>${branchLine}` : '';
         const teamSubline = `<div class="board-card-subline"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="7" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M17 11a4 4 0 0 1 4 4v2"/></svg> ${boardSessions.length} agents<span class="team-token-usage" data-board="${escapeAttr(boardName)}"></span></div>`;
         const sleepingClass = boardIsSleeping ? ' team-sleeping' : '';
-        html += `<li class="session-board-card session-board-card-toplevel${sleepingClass}" style="border-left-color: ${accentColor}">
+        html += `<li class="session-board-card session-board-card-toplevel${sleepingClass}" style="--team-accent: ${escapeAttr(accentColor)}">
             <div class="session-group-header board-card-header" data-group-name="${escapeAttr(boardName)}" onclick="toggleGroupCollapse('${escapeAttr(boardName)}')">
-                <span class="group-chevron">${bChevron}</span><div class="group-header-text"><div class="group-name-line">${escapeHtml(boardName)}${boardSleepIcon}</div>${teamDirLine}${teamSubline}</div><span class="session-name-spacer"></span>${boardLink}${bKebab}
+                <span class="group-chevron">${bChevron}</span><span class="team-room-crest" aria-hidden="true">${escapeHtml(roomCrest)}</span><div class="group-header-text"><div class="team-room-meta"><span class="team-room-label">Room ${roomNumber}</span><span class="team-room-signal"></span></div><div class="group-name-line">${escapeHtml(boardName)}${boardSleepIcon}</div>${teamDirLine}${teamSubline}</div><span class="session-name-spacer"></span>${boardLink}${bKebab}
             </div>
             <ul class="board-card-agents${boardCollapsed ? ' board-card-collapsed' : ''}">`;
 
@@ -1811,8 +1847,10 @@ export function renderLiveSessions(sessions) {
             }
 
             // Render board sub-groups as cards within the folder
-            for (const [boardName, boardSessions] of Object.entries(boardSubs)) {
-                const accentColor = _boardAccentColor(boardName);
+            for (const [boardIndex, [boardName, boardSessions]] of Object.entries(boardSubs).entries()) {
+                const accentColor = _boardAccentColor(boardName, boardIndex);
+                const roomNumber = _teamRoomNumber(boardIndex);
+                const roomCrest = _teamRoomCrest(boardName);
                 const boardCollapsed = _isGroupCollapsed(boardName);
                 const bChevron = boardCollapsed ? '&#x25B8;' : '&#x25BE;';
                 const boardLink = '';
@@ -1870,9 +1908,9 @@ export function renderLiveSessions(sessions) {
                 const branchLine = boardBranch ? `<div class="board-card-branch-line"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="4" r="2"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><path d="M5 6v4M10.2 5.2 7 8"/></svg> <span class="branch-name">${escapeHtml(boardBranch)}</span><button class="branch-copy-btn" onclick="event.stopPropagation(); navigator.clipboard.writeText('${escapeAttr(boardBranch)}'); this.textContent='✓'; setTimeout(() => this.innerHTML='<svg width=\\'10\\' height=\\'10\\' viewBox=\\'0 0 16 16\\' fill=\\'none\\' stroke=\\'currentColor\\' stroke-width=\\'1.5\\' stroke-linecap=\\'round\\'><rect x=\\'4\\' y=\\'4\\' width=\\'9\\' height=\\'9\\' rx=\\'1\\'/><path d=\\'M4 8H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1\\'/></svg>', 1000)" title="Copy branch name"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="4" y="4" width="9" height="9" rx="1"/><path d="M4 8H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1"/></svg></button></div>` : '';
                 const teamDirLine = boardWorkDir ? `<div class="board-card-dir" title="${escapeAttr(boardWorkDir)}"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8L6.5 3H3a1 1 0 0 0-1 1z"/></svg> ${escapeHtml(_shortPath(boardWorkDir, 3))}</div>${branchLine}` : '';
                 const teamSubline = `<div class="board-card-subline"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><circle cx="17" cy="7" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M17 11a4 4 0 0 1 4 4v2"/></svg> ${boardSessions.length} agents</div>`;
-                html += `<li class="session-board-card" style="border-left-color: ${accentColor}">
+                html += `<li class="session-board-card" style="--team-accent: ${escapeAttr(accentColor)}">
                     <div class="session-group-header board-card-header" onclick="toggleGroupCollapse('${escapeAttr(boardName)}')">
-                        <span class="group-chevron">${bChevron}</span><div class="group-header-text"><div class="group-name-line">${escapeHtml(boardName)}${boardSleepIcon} <span class="session-group-count">${boardSessions.length}</span></div>${teamDirLine}${teamSubline}</div><span class="session-name-spacer"></span>${boardLink}${bKebab}
+                        <span class="group-chevron">${bChevron}</span><span class="team-room-crest" aria-hidden="true">${escapeHtml(roomCrest)}</span><div class="group-header-text"><div class="team-room-meta"><span class="team-room-label">Room ${roomNumber}</span><span class="team-room-signal"></span></div><div class="group-name-line">${escapeHtml(boardName)}${boardSleepIcon} <span class="session-group-count">${boardSessions.length}</span></div>${teamDirLine}${teamSubline}</div><span class="session-name-spacer"></span>${boardLink}${bKebab}
                     </div>
                     <ul class="board-card-agents${boardCollapsed ? ' board-card-collapsed' : ''}">`;
                 const orderedBoardNested = _sortByOrder(boardSessions);
@@ -1928,6 +1966,7 @@ export function renderLiveSessions(sessions) {
 
     // Sync mobile agent list
     syncMobileAgentList();
+    _emitLiveSessionsRendered(sessions);
 }
 
 function _attachDragListeners(list) {

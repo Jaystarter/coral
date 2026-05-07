@@ -1,7 +1,7 @@
 /* Capture text rendering and auto-refresh */
 
 import { state, CAPTURE_REFRESH_MS } from './state.js';
-import { getRenderer } from './renderers.js';
+import { getRenderer, getRendererMode } from './renderers.js';
 import { renderTaskList } from './tasks.js';
 import { renderEventTimeline } from './agentic_state.js';
 import { getTerminalCols } from './xterm_renderer.js';
@@ -70,6 +70,12 @@ export function renderCaptureText(el, text) {
     renderer.render(el, text);
 }
 
+function shouldRenderSemanticCapture() {
+    if (!state.currentSession || state.currentSession.type !== "live") return false;
+    const mode = getRendererMode(state.currentSession.agent_type || "claude", state.currentSession.session_id || null);
+    return mode !== "xterm" || typeof Terminal === "undefined";
+}
+
 export async function refreshCapture() {
     if (!state.currentSession || state.currentSession.type !== "live") return;
 
@@ -84,6 +90,8 @@ export async function refreshCapture() {
         const params = new URLSearchParams();
         if (state.currentSession.agent_type) params.set("agent_type", state.currentSession.agent_type);
         if (state.currentSession.session_id) params.set("session_id", state.currentSession.session_id);
+        const renderSemanticCapture = shouldRenderSemanticCapture();
+        if (!renderSemanticCapture) params.set("include_capture", "false");
         const qs = params.toString() ? `?${params}` : "";
 
         // Single batch endpoint replaces separate capture + tasks + events calls
@@ -92,23 +100,27 @@ export async function refreshCapture() {
         const data = await resp.json();
 
         // ── Capture ──
-        const captureData = data.capture || {};
         const el = document.getElementById("pane-capture");
-        const text = captureData.capture || captureData.error || "No capture available";
+        if (renderSemanticCapture && el) {
+            const captureData = data.capture || {};
+            const text = captureData.capture || captureData.error || "No capture available";
 
-        if (el._lastCapture !== text) {
-            if (state.isSelecting) return;
+            if (el._lastCapture !== text) {
+                if (state.isSelecting) return;
 
-            const savedScroll = state.autoScroll ? null : el.scrollTop;
+                const savedScroll = state.autoScroll ? null : el.scrollTop;
 
-            el._lastCapture = text;
-            renderCaptureText(el, text);
+                el._lastCapture = text;
+                renderCaptureText(el, text);
 
-            if (state.autoScroll) {
-                el.scrollTop = el.scrollHeight;
-            } else if (savedScroll !== null) {
-                el.scrollTop = savedScroll;
+                if (state.autoScroll) {
+                    el.scrollTop = el.scrollHeight;
+                } else if (savedScroll !== null) {
+                    el.scrollTop = savedScroll;
+                }
             }
+        } else if (el) {
+            el._lastCapture = "";
         }
 
         // ── Tasks ──

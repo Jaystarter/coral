@@ -29,6 +29,50 @@ export function escapeAttr(str) {
         .replace(/\r/g, "\\r");
 }
 
+export function isExternalOpenUrl(url) {
+    if (!url) return false;
+    try {
+        const parsed = new URL(String(url), window.location.href);
+        return ["http:", "https:", "mailto:"].includes(parsed.protocol);
+    } catch {
+        return false;
+    }
+}
+
+export function openExternalUrl(url) {
+    if (!isExternalOpenUrl(url)) return false;
+    const target = new URL(String(url), window.location.href).href;
+
+    if (typeof window._coralOpenExternal === "function") {
+        window._coralOpenExternal(target);
+        return true;
+    }
+
+    const opened = window.open(target, "_blank", "noopener,noreferrer");
+    if (opened) {
+        try { opened.opener = null; } catch { /* noop */ }
+        return true;
+    }
+    window.location.href = target;
+    return true;
+}
+
+document.addEventListener("click", (event) => {
+    const anchor = event.target.closest?.([
+        ".message-text a[href]",
+        ".mb-message-body a[href]",
+        ".msg-content a[href]",
+        ".tool-card a[href]",
+        ".notification-toast a[href]",
+    ].join(", "));
+    if (!anchor) return;
+    const href = anchor.getAttribute("href");
+    if (!isExternalOpenUrl(href)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openExternalUrl(href);
+}, true);
+
 export function showToast(message, isError = false, duration = 4000) {
     const toast = document.createElement("div");
     toast.className = `toast ${isError ? "error" : ""}`;
@@ -116,6 +160,7 @@ export function showNotificationToast(agentLabel, detail, onClick) {
 
 const VIEW_IDS = [
     "welcome-screen",
+    "agent-canvas-view",
     "live-session-view",
     "history-session-view",
     "scheduler-view",
@@ -130,6 +175,7 @@ const VIEW_IDS = [
 
 const VIEW_DISPLAY = {
     "welcome-screen": "flex",
+    "agent-canvas-view": "flex",
     "live-session-view": "flex",
     "history-session-view": "flex",
     "scheduler-view": "block",
@@ -144,6 +190,7 @@ const VIEW_DISPLAY = {
 
 const FULL_WIDTH_VIEWS = new Set([
     "cost-dashboard-view",
+    "agent-canvas-view",
     "timeline-view",
     "kanban-view",
     "workflows-view",

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,10 @@ type tmuxSession struct {
 	info    SessionInfo
 	logPath string
 }
+
+const maxReplayBlankRun = 3
+
+var ansiCSIRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 // logTail manages one fsnotify-based tail goroutine per session,
 // fanning out new bytes to N subscriber channels.
@@ -331,9 +336,14 @@ func (b *TmuxBackend) Unsubscribe(name, subscriberID string) {
 	}
 }
 
-// Replay reads the last ReplayBytes() of the pipe-pane log file.
-// Falls back to capture-pane if the log file is empty (e.g. after server
-// restart before pipe-pane has produced new output).
+// Replay returns a reconnect seed for the terminal.
+//
+// Prefer tmux capture-pane over the raw pipe-pane log. The pipe log is useful
+// for live streaming, but a reconnect can start in the middle of a terminal UI
+// repaint sequence, leaving xterm with cursor movements that no longer have the
+// surrounding screen state. capture-pane gives us a clean line snapshot of the
+// pane history, which is much more stable when switching away from a chat and
+// returning later.
 func (b *TmuxBackend) Replay(name string) ([]byte, error) {
 	b.mu.RLock()
 	sess, ok := b.sessions[name]
@@ -345,23 +355,67 @@ func (b *TmuxBackend) Replay(name string) ([]byte, error) {
 		}
 	}
 
-	data, err := readTail(sess.logPath, ReplayBytes())
-	if err == nil && len(data) > 0 {
-		return data, nil
-	}
-
-	// Fallback: log file empty or missing — use capture-pane as emergency seed
 	ctx := context.Background()
 	target := name + ".0"
 	if resolved, findErr := b.client.FindPaneTarget(ctx, name, sess.info.AgentType, sess.info.SessionID); findErr == nil && resolved != "" {
 		target = resolved
 	}
-	content, capErr := b.client.CapturePaneRawTarget(ctx, target, 200)
-	if capErr == nil && content != "" {
-		return []byte(content), nil
+
+	if content, capErr := b.client.CapturePaneRawTarget(ctx, target, replayCaptureLines()); capErr == nil && strings.TrimSpace(content) != "" {
+		return normalizeCapturePaneReplay(content), nil
+	}
+
+	data, err := readTail(sess.logPath, ReplayBytes())
+	if err == nil && len(data) > 0 {
+		return data, nil
 	}
 
 	return data, err
+}
+
+func replayCaptureLines() int {
+	lines := ReplayBytes() / 128
+	if lines < 500 {
+		return 500
+	}
+	if lines > 2500 {
+		return 2500
+	}
+	return lines
+}
+
+func normalizeCapturePaneReplay(content string) []byte {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	normalized = collapseReplayBlankRuns(normalized)
+	normalized = strings.ReplaceAll(normalized, "\n", "\r\n")
+	return []byte(normalized)
+}
+
+func collapseReplayBlankRuns(content string) string {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	blankRun := 0
+
+	for _, line := range lines {
+		if isReplayBlankLine(line) {
+			blankRun++
+			if blankRun <= maxReplayBlankRun {
+				out = append(out, line)
+			}
+			continue
+		}
+
+		blankRun = 0
+		out = append(out, line)
+	}
+
+	return strings.Join(out, "\n")
+}
+
+func isReplayBlankLine(line string) bool {
+	plain := ansiCSIRe.ReplaceAllString(line, "")
+	return strings.TrimSpace(plain) == ""
 }
 
 func (b *TmuxBackend) ListSessions() []SessionInfo {

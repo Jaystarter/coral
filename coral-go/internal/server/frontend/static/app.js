@@ -27,7 +27,7 @@ import { loadCustomViews, activateCustomView } from './custom_views.js';
 import { initRouter, pushView } from './router.js';
 import { switchAgenticTab, restoreAgenticTabs, loadAgentEvents, toggleEventFilter, toggleAllEventFilters, toggleFilterDropdown, showFilterPopup, hideFilterPopup } from './agentic_state.js';
 import { toggleHistoryEventFilter, toggleAllHistoryEventFilters } from './history_tabs.js';
-import { copyBranchName, escapeHtml, showView } from './utils.js';
+import { copyBranchName, escapeHtml, showToast, showView } from './utils.js';
 import { initScheduler, selectScheduledJob, toggleScheduledJob, deleteScheduledJob, editScheduledJob, showJobModal, hideJobModal, validateCronPreview, saveScheduledJob, switchJobType, pickSchedulePreset } from './scheduler.js';
 import {
     showWebhookModal, hideWebhookModal, showWebhookCreate,
@@ -42,6 +42,7 @@ import { initWorkflows, showWorkflowsTab, selectWorkflow, selectWorkflowRun, tri
 import { showConnectedApps, showConnectAppModal, hideConnectAppModal, startOAuthFlow, testConnectedApp, disconnectApp } from './connected_apps.js';
 import { showCostDashboard, stopCostDashboard, _refreshCostDashboard, _costTimeRangeChanged } from './cost_dashboard.js';
 import { showDocsTab, selectDoc } from './docs.js';
+import { initAgentCanvas, showAgentCanvas, refreshAgentCanvas } from './mission_canvas.js';
 import { handleLiveHistoryScrollIntent, updateLiveHistoryFollowFromScroll } from './live_chat.js';
 import { initMobile, syncMobileAgentList } from './mobile.js';
 import { platform } from './platform/detect.js';
@@ -134,6 +135,8 @@ Object.assign(window, {
     showCostDashboard, _refreshCostDashboard, _costTimeRangeChanged,
     // docs
     showDocsTab, selectDoc,
+    // mission canvas
+    showAgentCanvas, refreshAgentCanvas,
     // folder_tags
     showFolderTagDropdown, hideFolderTagDropdown, addFolderTag, removeFolderTag, createAndAddFolderTag,
     // utils
@@ -150,26 +153,46 @@ Object.assign(window, {
 function resetTeam(boardName) {
     showConfirmModal('Reset Team', `Reset all agents in "${boardName}"? Their context will be cleared and they'll restart with their original prompts.`, async () => {
         try {
+            showToast(`Resetting "${boardName}"...`);
             const resp = await fetch(`/api/sessions/live/team/${encodeURIComponent(boardName)}/reset`, { method: 'POST' });
-            if (resp.ok) {
-                showToast(`Team "${boardName}" is resetting...`);
-            } else {
-                const data = await resp.json().catch(() => ({}));
-                showToast(data.error || 'Reset failed', true);
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.ok === false) {
+                const detail = data.errors?.length
+                    ? ` ${data.errors.length} relaunch issue${data.errors.length === 1 ? '' : 's'}.`
+                    : '';
+                showToast(`${data.error || 'Reset failed'}.${detail}`, true, 8000);
+                await loadLiveSessions();
+                return;
             }
-        } catch {
-            showToast('Reset failed', true);
+
+            const count = Array.isArray(data.agents) ? data.agents.length : 0;
+            if (Array.isArray(data.errors) && data.errors.length > 0) {
+                showToast(`Reset launched ${count} agent${count === 1 ? '' : 's'}, but ${data.errors.length} failed.`, true, 8000);
+            } else {
+                showToast(`Reset launched ${count} agent${count === 1 ? '' : 's'} for "${boardName}"`);
+            }
+            await loadLiveSessions();
+            setTimeout(loadLiveSessions, 1000);
+            setTimeout(loadLiveSessions, 3000);
+        } catch (err) {
+            console.error('Reset team failed:', err);
+            showToast('Reset failed. Check the server log for details.', true, 8000);
+            await loadLiveSessions();
         }
     });
 }
 
 // ── Top Nav Tab Switching ─────────────────────────────────────────────
 function switchNavTab(tab) {
+    if (tab === 'canvas') {
+        pushView('canvas');
+    }
+
     // Clean up any active cost dashboard timer when leaving tokens tab
     stopCostDashboard();
 
     // Toggle sidebar visibility — full-width views hide the sidebar
-    const fullWidthTabs = new Set(['tokens', 'workflows', 'connected-apps']);
+    const fullWidthTabs = new Set(['canvas', 'tokens', 'workflows', 'connected-apps']);
     const layout = document.querySelector('.layout');
     if (layout) layout.classList.toggle('sidebar-hidden', fullWidthTabs.has(tab));
 
@@ -194,6 +217,8 @@ function switchNavTab(tab) {
     // Switch main view based on tab
     if (tab === 'board') {
         showView('messageboard-view');
+    } else if (tab === 'canvas') {
+        showAgentCanvas();
     } else if (tab === 'jobs') {
         showView('scheduler-view');
     } else if (tab === 'workflows') {
@@ -668,6 +693,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initScheduler();
     initLiveJobs();
     initMessageBoard();
+    initAgentCanvas();
     initMobile();
 
     // Hide connected apps in prod builds (feature is dev/beta only)

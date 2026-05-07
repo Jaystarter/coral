@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -485,6 +486,15 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resize before replay so capture-pane snapshots use the dimensions of the
+	// view the user just returned to, not whatever size the pane had while the
+	// terminal was hidden or another chat was selected.
+	if cols, rows, ok := parseTerminalResizeQuery(r); ok {
+		if err := h.backend.Resize(name, uint16(cols), uint16(rows)); err != nil {
+			slog.Debug("ws/terminal initial resize failed", "name", name, "cols", cols, "rows", rows, "error", err)
+		}
+	}
+
 	subID := fmt.Sprintf("ws-%d", time.Now().UnixNano())
 	ch, err := h.backend.Attach(name, subID)
 	if err != nil {
@@ -563,4 +573,17 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func parseTerminalResizeQuery(r *http.Request) (int, int, bool) {
+	query := r.URL.Query()
+	cols, err := strconv.Atoi(query.Get("cols"))
+	if err != nil || cols < 10 {
+		return 0, 0, false
+	}
+	rows, err := strconv.Atoi(query.Get("rows"))
+	if err != nil || rows < 5 {
+		rows = 50
+	}
+	return cols, rows, true
 }

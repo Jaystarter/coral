@@ -1,7 +1,7 @@
 /* xterm.js terminal renderer — streams raw ANSI output via WebSocket */
 
 import { state } from './state.js';
-import { dbg } from './utils.js';
+import { dbg, openExternalUrl } from './utils.js';
 import { LOCAL_PREVIEW_EXT_PATTERN, extractLocalPreviewLinks, openLocalFilePreview } from './changed_files.js';
 
 let terminal = null;
@@ -18,13 +18,15 @@ let _terminalFocused = false;
 let _submittedCommandDecorations = [];
 let _fallbackSubmittedMarkerTimer = null;
 let _submittedCommandRenderTimer = null;
-let _submittedCommandShelfTimer = null;
+let _submittedCommandRenderNeedsSearch = false;
 let _operatorInputBuffer = "";
 
 const SUBMITTED_COMMAND_STORAGE_KEY = "coral.submittedCommands.v1";
 const SUBMITTED_COMMAND_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_SUBMITTED_COMMANDS_PER_SESSION = 80;
+const MAX_RESTORED_COMMAND_DECORATIONS = 10;
 const MAX_STORED_COMMAND_CHARS = 12000;
+const TERMINAL_REPLAY_CHUNK_BYTES = 12 * 1024;
 
 // Input queue: buffers keystrokes while WebSocket is disconnected
 let _inputQueue = [];
@@ -56,6 +58,26 @@ function _getXtermTheme() {
         brightCyan:          v('--xterm-bright-cyan')          || '#56d4dd',
         brightWhite:         v('--xterm-bright-white')         || '#f0f6fc',
     };
+}
+
+function _isTerminalContainerMeasurable(container) {
+    if (!container || !container.isConnected) return false;
+    if (container.offsetWidth < 40 || container.offsetHeight < 40) return false;
+    const style = window.getComputedStyle(container);
+    return style.display !== "none" && style.visibility !== "hidden";
+}
+
+function _fitTerminalSafely(reason = "fit") {
+    const container = _getXtermContainer();
+    if (!terminal || !fitAddon || !_isTerminalContainerMeasurable(container)) return false;
+
+    try {
+        fitAddon.fit();
+        return true;
+    } catch (err) {
+        dbg("terminal fit failed", reason, err);
+        return false;
+    }
 }
 
 /** Update the live terminal theme (called when user switches theme). */
@@ -158,60 +180,12 @@ function _finishTerminalReplayWait() {
     _setTerminalReplayStatus(false);
 }
 
-function _setSubmittedCommandShelf(records, visible) {
-    const container = _getXtermContainer();
-    if (!container) return;
-
-    let shelf = container.querySelector(".xterm-submitted-shelf");
-    if (!shelf && visible) {
-        shelf = document.createElement("div");
-        shelf.className = "xterm-submitted-shelf";
-        shelf.setAttribute("aria-label", "Messages submitted by you");
-        container.appendChild(shelf);
-    }
-    if (!shelf) return;
-
-    if (!visible || !records?.length) {
-        shelf.classList.remove("is-visible");
-        return;
-    }
-
-    const items = records.slice(0, 3).map(record => {
-        const command = _formatSubmittedCommandShelfText(record.command);
-        return `<div class="xterm-submitted-shelf-item">${_escapeHtml(command)}</div>`;
-    }).join("");
-
-    shelf.innerHTML = `
-        <div class="xterm-submitted-shelf-title">You sent</div>
-        ${items}
-    `;
-    shelf.classList.add("is-visible");
-}
-
-function _syncSubmittedCommandShelf() {
-    clearTimeout(_submittedCommandShelfTimer);
-    _submittedCommandShelfTimer = setTimeout(() => {
-        _submittedCommandShelfTimer = null;
-        const container = _getXtermContainer();
-        if (!container) return;
-
-        const records = _loadSubmittedCommandsForCurrentSession();
-        if (records.length === 0) {
-            _setSubmittedCommandShelf([], false);
-            return;
-        }
-
-        const hasVisibleInlineMarker = !!container.querySelector(".xterm-operator-send-marker.is-visible");
-        _setSubmittedCommandShelf(records, !hasVisibleInlineMarker);
-    }, 80);
-}
-
 function _refreshTerminalViewport() {
     if (!terminal) return;
     requestAnimationFrame(() => {
         if (!terminal) return;
         try {
-            if (fitAddon) fitAddon.fit();
+            _fitTerminalSafely("refresh");
             terminal.refresh(0, Math.max(0, terminal.rows - 1));
             if (_needsScrollToBottom) terminal.scrollToBottom();
         } catch (err) {
@@ -220,25 +194,84 @@ function _refreshTerminalViewport() {
     });
 }
 
-function _writeTerminalData(data, onSettled) {
+function _writeTerminalData(data, onSettled, options = {}) {
     if (!terminal) return;
 
     let settled = false;
-    const finish = () => {
+    const shouldContinue = typeof options.shouldContinue === "function"
+        ? options.shouldContinue
+        : () => true;
+    const finish = (completed = true) => {
         if (settled) return;
         settled = true;
-        onSettled?.();
+        onSettled?.(completed);
     };
 
+    const bytes = data instanceof Uint8Array
+        ? data
+        : (data instanceof ArrayBuffer ? new Uint8Array(data) : null);
+    if (options.chunked && bytes && bytes.byteLength > TERMINAL_REPLAY_CHUNK_BYTES) {
+        _writeTerminalDataInChunks(bytes, finish, shouldContinue);
+        return;
+    }
+
     try {
-        terminal.write(data, finish);
+        if (!shouldContinue()) {
+            finish(false);
+            return;
+        }
+        terminal.write(data, () => {
+            finish(shouldContinue());
+        });
     } catch (err) {
         terminal.write(data);
-        finish();
+        finish(shouldContinue());
     }
 
     // Older xterm builds may ignore the callback argument.
-    setTimeout(finish, 80);
+    setTimeout(() => finish(shouldContinue()), 80);
+}
+
+function _writeTerminalDataInChunks(bytes, finish, shouldContinue) {
+    let offset = 0;
+
+    const writeNextChunk = () => {
+        if (!terminal || !shouldContinue()) {
+            finish(false);
+            return;
+        }
+        if (offset >= bytes.byteLength) {
+            finish(true);
+            return;
+        }
+
+        const end = Math.min(offset + TERMINAL_REPLAY_CHUNK_BYTES, bytes.byteLength);
+        const chunk = bytes.subarray(offset, end);
+        offset = end;
+
+        let chunkSettled = false;
+        const afterChunk = () => {
+            if (chunkSettled) return;
+            chunkSettled = true;
+            if (offset >= bytes.byteLength) {
+                finish(shouldContinue());
+            } else {
+                requestAnimationFrame(writeNextChunk);
+            }
+        };
+
+        try {
+            terminal.write(chunk, afterChunk);
+        } catch (err) {
+            terminal.write(chunk);
+            afterChunk();
+        }
+
+        // Older xterm builds may ignore the callback argument.
+        setTimeout(afterChunk, 80);
+    };
+
+    writeNextChunk();
 }
 
 /** Reuse the existing terminal if possible.
@@ -258,9 +291,7 @@ export function createTerminal(containerEl) {
     if (terminal) {
         disconnectTerminalWs();
         dbg('createTerminal: reusing existing terminal, preserving buffer until replay');
-        if (fitAddon) {
-            requestAnimationFrame(() => { if (fitAddon) fitAddon.fit(); });
-        }
+        requestAnimationFrame(() => _fitTerminalSafely("reuse"));
         return terminal;
     }
 
@@ -281,7 +312,9 @@ export function createTerminal(containerEl) {
     terminal.loadAddon(fitAddon);
 
     if (typeof WebLinksAddon !== 'undefined') {
-        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon((_event, uri) => {
+            openExternalUrl(uri);
+        });
         terminal.loadAddon(webLinksAddon);
     }
     _registerLocalFileLinkProvider();
@@ -353,10 +386,10 @@ export function createTerminal(containerEl) {
 
     terminal.open(containerEl);
     _onRenderDisposable = typeof terminal.onRender === "function"
-        ? terminal.onRender(() => _queueSubmittedCommandOverlayRender())
+        ? terminal.onRender(() => _queueSubmittedCommandOverlayRender({ delay: 48, allowSearch: false }))
         : null;
     _onScrollDisposable = typeof terminal.onScroll === "function"
-        ? terminal.onScroll(() => _queueSubmittedCommandOverlayRender())
+        ? terminal.onScroll(() => _queueSubmittedCommandOverlayRender({ delay: 64, allowSearch: false }))
         : null;
     dbg('terminal.open() done, container:', containerEl.offsetWidth, 'x', containerEl.offsetHeight,
         'display:', containerEl.style.display, 'cols:', terminal.cols, 'rows:', terminal.rows);
@@ -367,8 +400,7 @@ export function createTerminal(containerEl) {
     // Using rAF + a small fallback timeout ensures the terminal gets sized
     // correctly in both browsers and embedded webviews.
     requestAnimationFrame(() => {
-        if (fitAddon) {
-            fitAddon.fit();
+        if (_fitTerminalSafely("open")) {
             dbg('rAF fit() done, cols:', terminal?.cols, 'rows:', terminal?.rows,
                 'container:', containerEl.offsetWidth, 'x', containerEl.offsetHeight);
         }
@@ -379,9 +411,7 @@ export function createTerminal(containerEl) {
     if (typeof ResizeObserver !== 'undefined') {
         if (_resizeObserver) _resizeObserver.disconnect();
         _resizeObserver = new ResizeObserver(() => {
-            if (fitAddon && containerEl.offsetWidth > 0 && containerEl.offsetHeight > 0) {
-                fitAddon.fit();
-            }
+            _fitTerminalSafely("resize-observer");
         });
         _resizeObserver.observe(containerEl);
     }
@@ -401,7 +431,7 @@ export function createTerminal(containerEl) {
 
     // Sync tmux pane dimensions when xterm resizes (e.g. after fitAddon.fit())
     _onResizeDisposable = terminal.onResize(({ cols, rows }) => {
-        if (terminalWs && terminalWs.readyState === WebSocket.OPEN) {
+        if (cols >= 10 && rows >= 5 && terminalWs && terminalWs.readyState === WebSocket.OPEN) {
             terminalWs.send(JSON.stringify({
                 type: "terminal_resize",
                 cols: cols,
@@ -603,6 +633,11 @@ export function connectTerminalWs(name, agentType, sessionId) {
     const params = new URLSearchParams();
     if (agentType) params.set("agent_type", agentType);
     if (sessionId) params.set("session_id", sessionId);
+    _fitTerminalSafely("connect");
+    if (terminal?.cols >= 10 && terminal?.rows >= 5) {
+        params.set("cols", String(terminal.cols));
+        params.set("rows", String(terminal.rows));
+    }
     const qs = params.toString() ? `?${params}` : "";
 
     terminalWs = new WebSocket(
@@ -613,7 +648,8 @@ export function connectTerminalWs(name, agentType, sessionId) {
     terminalWs.onopen = () => {
         dbg('terminalWs OPEN', { sessionId, url: terminalWs.url });
         _setDisconnectedBadge(false);
-        if (terminal) {
+        _fitTerminalSafely("ws-open");
+        if (terminal?.cols >= 10 && terminal?.rows >= 5) {
             terminalWs.send(JSON.stringify({
                 type: 'terminal_resize',
                 cols: terminal.cols,
@@ -653,10 +689,13 @@ export function connectTerminalWs(name, agentType, sessionId) {
                     terminal.clear();
                     terminal.reset();
                     _clearSubmittedCommandDecorations();
-                    _finishTerminalReplayWait();
                 }
-                _writeTerminalData(new Uint8Array(event.data), () => {
+                _writeTerminalData(new Uint8Array(event.data), (completed) => {
+                    if (!completed || myGeneration !== _wsGeneration || state.currentSession?.session_id !== sessionId) {
+                        return;
+                    }
                     if (wasReplaySeed) {
+                        _finishTerminalReplayWait();
                         _restoreSubmittedCommandDecorations();
                     } else {
                         _queueSubmittedCommandOverlayRender();
@@ -671,6 +710,10 @@ export function connectTerminalWs(name, agentType, sessionId) {
                             _needsScrollToBottom = false;
                         }, 500);
                     }
+                }, {
+                    chunked: wasReplaySeed,
+                    shouldContinue: () => myGeneration === _wsGeneration
+                        && state.currentSession?.session_id === sessionId,
                 });
             }
             return;
@@ -764,7 +807,6 @@ export function disposeTerminal() {
     _inputQueue = [];
     _finishTerminalReplayWait();
     _clearSubmittedCommandDecorations();
-    _setSubmittedCommandShelf([], false);
     if (_resizeObserver) {
         _resizeObserver.disconnect();
         _resizeObserver = null;
@@ -777,9 +819,7 @@ export function disposeTerminal() {
 }
 
 export function fitTerminal() {
-    if (fitAddon) {
-        fitAddon.fit();
-    }
+    _fitTerminalSafely("external");
 }
 
 export function getTerminalCols() {
@@ -804,10 +844,6 @@ export function markCommandSubmitted(command) {
     const label = "YOU SENT";
     const container = _getXtermContainer();
     _rememberSubmittedCommandForSession(command);
-    const records = _loadSubmittedCommandsForCurrentSession();
-    _setSubmittedCommandShelf(records, records.length > 0);
-    setTimeout(() => _syncSubmittedCommandShelf(), 320);
-    setTimeout(() => _syncSubmittedCommandShelf(), 900);
     if (!terminal || !container) {
         _showFallbackSubmittedMarker(label);
         return;
@@ -820,6 +856,8 @@ export function markCommandSubmitted(command) {
         label,
         lineCount: _estimateSubmittedCommandHeight(command),
         needles: _buildSubmittedCommandNeedles(command),
+        bufferRange: null,
+        scanAttempted: false,
         freshHighlight: true,
         hasBeenVisible: false,
         element: null,
@@ -833,7 +871,7 @@ export function markCommandSubmitted(command) {
         _disposeSubmittedCommandDecoration(_submittedCommandDecorations.shift());
     }
 
-    _renderSubmittedCommandOverlay(entry);
+    _renderSubmittedCommandOverlay(entry, { allowSearch: true });
     _scheduleSubmittedCommandOverlayRenders(entry);
 }
 
@@ -845,13 +883,11 @@ function _restoreSubmittedCommandDecorations() {
     if (!container) return;
     if (records.length === 0) {
         _clearSubmittedCommandDecorations();
-        _setSubmittedCommandShelf([], false);
         return;
     }
 
     _clearSubmittedCommandDecorations();
-    _setSubmittedCommandShelf(records, true);
-    for (const record of records.slice().reverse()) {
+    for (const record of records.slice(0, MAX_RESTORED_COMMAND_DECORATIONS).reverse()) {
         const entry = {
             command: String(record.command || ""),
             normalized: _normalizeTerminalSearchText(record.command),
@@ -859,6 +895,8 @@ function _restoreSubmittedCommandDecorations() {
             label: "YOU SENT",
             lineCount: _estimateSubmittedCommandHeight(record.command),
             needles: _buildSubmittedCommandNeedles(record.command),
+            bufferRange: null,
+            scanAttempted: false,
             freshHighlight: false,
             hasBeenVisible: false,
             element: null,
@@ -874,7 +912,6 @@ function _restoreSubmittedCommandDecorations() {
         _disposeSubmittedCommandDecoration(_submittedCommandDecorations.shift());
     }
     _scheduleSubmittedCommandOverlayBatchRender();
-    setTimeout(() => _syncSubmittedCommandShelf(), 700);
 }
 
 function _disposeSubmittedCommandDecoration(entry) {
@@ -888,6 +925,7 @@ function _disposeSubmittedCommandDecoration(entry) {
 function _clearSubmittedCommandDecorations() {
     clearTimeout(_submittedCommandRenderTimer);
     _submittedCommandRenderTimer = null;
+    _submittedCommandRenderNeedsSearch = false;
     for (const entry of _submittedCommandDecorations.splice(0)) {
         _disposeSubmittedCommandDecoration(entry);
     }
@@ -1065,21 +1103,6 @@ function _trackOperatorTerminalInput(data) {
     }
 }
 
-function _escapeHtml(value) {
-    return String(value ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
-
-function _formatSubmittedCommandShelfText(value) {
-    const compact = String(value || "").replace(/\s+/g, " ").trim();
-    if (compact.length <= 150) return compact;
-    return `${compact.slice(0, 147)}...`;
-}
-
 function _estimateSubmittedCommandHeight(command) {
     const cols = Math.max((terminal?.cols || 80) - 4, 1);
     const lines = String(command || "").split(/\r?\n/);
@@ -1130,33 +1153,43 @@ function _createSubmittedCommandOverlay(entry) {
 
 function _scheduleSubmittedCommandOverlayRenders(entry) {
     for (const delay of [20, 60, 120, 240, 420, 700, 1100, 1700, 2600, 4000, 6000]) {
-        const timer = setTimeout(() => _renderSubmittedCommandOverlay(entry), delay);
+        const timer = setTimeout(() => _renderSubmittedCommandOverlay(entry, { allowSearch: true }), delay);
         entry.retryTimers.push(timer);
     }
 }
 
 function _scheduleSubmittedCommandOverlayBatchRender() {
-    for (const delay of [40, 120, 260, 520, 900, 1500]) {
-        setTimeout(() => _queueSubmittedCommandOverlayRender(), delay);
+    const passes = [
+        { delay: 80, allowSearch: true },
+        { delay: 260, allowSearch: false },
+        { delay: 700, allowSearch: false },
+        { delay: 1500, allowSearch: false },
+    ];
+    for (const pass of passes) {
+        setTimeout(() => _queueSubmittedCommandOverlayRender(pass), pass.delay);
     }
 }
 
-function _queueSubmittedCommandOverlayRender(delay = 32) {
+function _queueSubmittedCommandOverlayRender(options = {}) {
+    const delay = typeof options === "number" ? options : (options.delay ?? 32);
+    const allowSearch = typeof options === "object" && !!options.allowSearch;
+    _submittedCommandRenderNeedsSearch = _submittedCommandRenderNeedsSearch || allowSearch;
     if (_submittedCommandRenderTimer || _submittedCommandDecorations.length === 0) return;
     _submittedCommandRenderTimer = setTimeout(() => {
         _submittedCommandRenderTimer = null;
+        const shouldSearch = _submittedCommandRenderNeedsSearch;
+        _submittedCommandRenderNeedsSearch = false;
         for (const entry of _submittedCommandDecorations) {
-            _renderSubmittedCommandOverlay(entry);
+            _renderSubmittedCommandOverlay(entry, { allowSearch: shouldSearch });
         }
-        _syncSubmittedCommandShelf();
     }, delay);
 }
 
-function _renderSubmittedCommandOverlay(entry) {
+function _renderSubmittedCommandOverlay(entry, { allowSearch = false } = {}) {
     if (!entry || !entry.element) return false;
 
     const container = _getXtermContainer();
-    const range = _findSubmittedCommandDomRange(entry);
+    const range = _findSubmittedCommandDomRange(entry, { allowSearch });
     if (!container || !range) {
         entry.element.classList.remove("is-visible");
         return false;
@@ -1188,13 +1221,13 @@ function _renderSubmittedCommandOverlay(entry) {
     return true;
 }
 
-function _findSubmittedCommandDomRange(entry) {
+function _findSubmittedCommandDomRange(entry, { allowSearch = false } = {}) {
     const rowsContainer = terminal?.element?.querySelector(".xterm-rows")
         || document.querySelector("#xterm-container .xterm-rows");
     if (!rowsContainer || !entry?.needles?.length) return null;
 
     const rows = Array.from(rowsContainer.children).filter(row => row instanceof HTMLElement);
-    const bufferRange = _findSubmittedCommandBufferRange(entry);
+    const bufferRange = _getSubmittedCommandBufferRange(entry, allowSearch);
     if (bufferRange) {
         const viewportY = terminal?.buffer?.active?.viewportY || 0;
         const startVisibleRow = bufferRange.startLine - viewportY;
@@ -1205,6 +1238,8 @@ function _findSubmittedCommandDomRange(entry) {
         const endRow = rows[Math.min(rows.length - 1, endVisibleRow)];
         if (startRow && endRow) return { rowsContainer, startRow, endRow };
     }
+
+    if (!allowSearch) return null;
 
     // Fallback for older xterm builds where buffer viewport metadata is absent.
     const maxSampleHeight = Math.max(entry.lineCount + 6, 12);
@@ -1246,6 +1281,16 @@ function _findSubmittedCommandDomRange(entry) {
     candidates.sort((a, b) => b.score - a.score);
     const { rowsContainer: bestRowsContainer, startRow, endRow } = candidates[0];
     return { rowsContainer: bestRowsContainer, startRow, endRow };
+}
+
+function _getSubmittedCommandBufferRange(entry, allowSearch) {
+    if (entry.bufferRange) return entry.bufferRange;
+    if (!allowSearch) return null;
+
+    const range = _findSubmittedCommandBufferRange(entry);
+    entry.scanAttempted = true;
+    if (range) entry.bufferRange = range;
+    return range;
 }
 
 function _findSubmittedCommandBufferRange(entry) {
