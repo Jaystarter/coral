@@ -22,16 +22,20 @@ var (
 		".webp": true, ".bmp": true, ".tiff": true,
 		// SVG intentionally excluded: SVG files can contain embedded JavaScript,
 		// creating a stored XSS risk if served inline.
+		".md": true, ".markdown": true, ".txt": true, ".log": true,
 	}
 
 	contentTypeToExt = map[string]string{
-		"image/png":     ".png",
-		"image/jpeg":    ".jpg",
-		"image/gif":     ".gif",
-		"image/webp":    ".webp",
-		"image/bmp":     ".bmp",
+		"image/png":  ".png",
+		"image/jpeg": ".jpg",
+		"image/gif":  ".gif",
+		"image/webp": ".webp",
+		"image/bmp":  ".bmp",
 		// "image/svg+xml" excluded: XSS risk
-		"image/tiff":    ".tiff",
+		"image/tiff":      ".tiff",
+		"text/plain":      ".txt",
+		"text/markdown":   ".md",
+		"text/x-markdown": ".md",
 	}
 
 	maxFileSize int64 = 20 * 1024 * 1024 // 20 MB
@@ -43,8 +47,7 @@ func InitUploadDir(coralDir string) {
 	uploadDir = filepath.Join(coralDir, "uploads")
 }
 
-
-// UploadFile handles POST /api/upload — upload an image and return its path.
+// UploadFile handles POST /api/upload — upload a local attachment and return its path.
 func UploadFile(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxFileSize); err != nil {
 		errBadRequest(w, "File too large or invalid multipart form")

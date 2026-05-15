@@ -17,6 +17,8 @@ async function _getXtermModule() {
 // Attached image paths (cleared on send)
 const pendingAttachments = [];
 let commandSentAckTimer = null;
+const LARGE_TEXT_ATTACHMENT_BYTES = 24 * 1024;
+const LARGE_TEXT_ATTACHMENT_LINES = 280;
 
 function _normalizeSubmittedMessage(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -62,6 +64,71 @@ function showCommandSentAck(command) {
     }, 1050);
 }
 
+function _textByteLength(value) {
+    if (typeof TextEncoder !== "undefined") {
+        return new TextEncoder().encode(String(value || "")).length;
+    }
+    return new Blob([String(value || "")]).size;
+}
+
+function _shouldAttachLargeText(value) {
+    const text = String(value || "");
+    if (!text.trim()) return false;
+    return _textByteLength(text) >= LARGE_TEXT_ATTACHMENT_BYTES
+        || text.split(/\r\n|\r|\n/).length >= LARGE_TEXT_ATTACHMENT_LINES;
+}
+
+function _timestampForFilename() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function _formatAttachmentForCommand(att) {
+    if (att?.kind === "transcript") {
+        return `Read the attached transcript at ${att.path} and use it as context.`;
+    }
+    return att?.path || "";
+}
+
+async function uploadTranscriptAttachment(text, { source = "paste" } = {}) {
+    const content = String(text || "");
+    if (!content.trim()) return null;
+
+    const filename = `transcript_${_timestampForFilename()}.md`;
+    const formData = new FormData();
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    formData.append("file", blob, filename);
+
+    try {
+        showToast(source === "send" ? "Saving large message as transcript..." : "Attaching pasted transcript...");
+        const resp = await fetch("/api/upload", {
+            method: "POST",
+            body: formData,
+        });
+        const result = await resp.json();
+        if (!resp.ok || result.error) {
+            showToast(result.error || `Upload failed (${resp.status})`, true);
+            return null;
+        }
+
+        const attachment = {
+            kind: "transcript",
+            path: result.path,
+            filename: result.filename || filename,
+            size: result.size || content.length,
+        };
+        pendingAttachments.push(attachment);
+        renderAttachments();
+        showToast(`Transcript attached: ${attachment.filename}`);
+        return attachment;
+    } catch (e) {
+        showToast("Failed to attach transcript", true);
+        console.error("Transcript upload error:", e);
+        return null;
+    }
+}
+
 export async function sendCommand() {
     if (!state.currentSession || state.currentSession.type !== "live") {
         showToast("No live session selected", true);
@@ -69,12 +136,20 @@ export async function sendCommand() {
     }
 
     const input = document.getElementById("command-input");
-    const textPart = input.value.trim();
+    let textPart = input.value.trim();
 
-    // Build the full command: image paths + text, space-separated
+    if (_shouldAttachLargeText(textPart)) {
+        const attachment = await uploadTranscriptAttachment(textPart, { source: "send" });
+        if (!attachment) return;
+        input.value = "";
+        textPart = "Use the attached transcript as the source material for this request.";
+    }
+
+    // Build the full command: attachments + text, space-separated
     const parts = [];
     for (const att of pendingAttachments) {
-        parts.push(att.path);
+        const formatted = _formatAttachmentForCommand(att);
+        if (formatted) parts.push(formatted);
     }
     if (textPart) parts.push(textPart);
 
@@ -289,6 +364,7 @@ export function renderQuickActions() {
         <button class="btn-nav btn-mode" onclick="cycleModeToggle()" data-tooltip="Cycles through Default → Plan → Accept Edits modes (Shift+Tab). Each click advances one step."><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2h8a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><line x1="6" y1="5" x2="10" y2="5"/><line x1="6" y1="8" x2="10" y2="8"/><line x1="6" y1="11" x2="8" y2="11"/></svg><span class="btn-label">Mode</span></button>
         <button class="btn-nav btn-mode" onclick="sendQuickCommand('!')" data-tooltip="Prefixes your input with ! so Claude runs it as a shell command instead of a prompt."><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><polyline points="4 7 6 9 4 11"/><line x1="8" y1="11" x2="12" y2="11"/></svg><span class="btn-label">Bash</span></button>
         <button class="btn-nav btn-mode" onclick="sendRawKeys(['Escape','Escape'])" data-tooltip="Sends two Escape keys to Claude. Interrupts the current response, rejects a pending tool call, or backs out of a permission prompt."><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 2v4h4"/><path d="M3.5 6A5.5 5.5 0 1 1 2.5 8"/></svg><span class="btn-label">Undo</span></button>
+        <button class="btn-nav btn-mode btn-table-reader" onclick="openMarkdownTableReader()" data-tooltip="Renders the nearest Markdown table in the terminal as a readable table."><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><line x1="2" y1="6.5" x2="14" y2="6.5"/><line x1="6" y1="3" x2="6" y2="13"/><line x1="10" y1="3" x2="10" y2="13"/></svg><span class="btn-label">Table</span></button>
     `;
 
     const macroButtons = macros.map((m, i) => {
@@ -779,7 +855,17 @@ export function initImageDrop() {
 
         const items = [...(e.clipboardData?.items || [])];
         const imageItems = items.filter(item => item.type.startsWith("image/"));
-        if (imageItems.length === 0) return;
+        if (imageItems.length === 0) {
+            const pastedText = e.clipboardData?.getData("text/plain") || "";
+            const isCommandPaste = e.target?.id === "command-input"
+                || document.getElementById("command-pane")?.contains(e.target);
+            if (!isCommandPaste || !_shouldAttachLargeText(pastedText)) return;
+
+            e.preventDefault();
+            await uploadTranscriptAttachment(pastedText, { source: "paste" });
+            document.getElementById("command-input")?.focus();
+            return;
+        }
 
         // Extract all files synchronously before any async work,
         // because clipboardData items become invalid after the event.
@@ -827,6 +913,7 @@ async function uploadAndInsertImage(file) {
         // Create a local object URL for the thumbnail preview
         const previewUrl = URL.createObjectURL(file);
         pendingAttachments.push({
+            kind: "image",
             path: result.path,
             filename: result.filename,
             previewUrl,
@@ -853,8 +940,10 @@ function renderAttachments() {
 
     container.style.display = "flex";
     container.innerHTML = pendingAttachments.map((att, i) => `
-        <div class="image-attachment" title="${escapeAttr(att.path)}">
-            <img src="${att.previewUrl}" alt="${escapeAttr(att.filename)}" />
+        <div class="image-attachment ${att.kind === "transcript" ? "is-document" : ""}" title="${escapeAttr(att.path)}">
+            ${att.kind === "transcript"
+                ? '<span class="image-attachment-icon" aria-hidden="true">TXT</span>'
+                : `<img src="${att.previewUrl}" alt="${escapeAttr(att.filename)}" />`}
             <span class="image-attachment-name">${escapeHtml(att.filename)}</span>
             <button class="image-attachment-remove" onclick="removeAttachment(${i})" title="Remove">&times;</button>
         </div>

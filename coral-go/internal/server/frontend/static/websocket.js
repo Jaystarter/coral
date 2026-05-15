@@ -6,6 +6,7 @@ import { renderLiveJobs } from './live_jobs.js';
 import { updateChangedFileCount } from './changed_files.js';
 import { updateSectionVisibility } from './sidebar.js';
 import { showNotificationToast, showWorkflowNotification, showAlertNotification, showToast, escapeHtml, dbg } from './utils.js';
+import { refreshCurrentTaskPanelFromLiveSessions } from './tasks.js';
 
 export function connectCoralWs() {
     dbg('connectCoralWs: establishing connection');
@@ -42,6 +43,7 @@ export function connectCoralWs() {
                         if (changed.context_pct === undefined && sessions[idx].context_pct !== undefined) {
                             changed.context_pct = sessions[idx].context_pct;
                             changed.context_window = sessions[idx].context_window;
+                            changed.context_tokens = sessions[idx].context_tokens;
                         }
                         sessions[idx] = changed;
                     } else {
@@ -166,15 +168,16 @@ export function connectCoralWs() {
                     const termDot = document.getElementById('terminal-status-dot');
                     if (termDot) {
                         const provider = (s.agent_type || state.currentSession.agent_type || "claude").toLowerCase().replace(/[^a-z0-9_-]/g, "");
-                        const recentlyActiveCodex = provider === "codex" && Number.isFinite(Number(s.staleness_seconds)) && Number(s.staleness_seconds) < 30;
-                        const statusClass = s.done || s.sleeping ? "disabled"
+                        const statusClass = s.done ? "done"
+                            : s.sleeping ? "sleeping"
                             : s.waiting_for_input ? "waiting"
                             : s.stuck ? "stuck"
-                            : s.working || recentlyActiveCodex ? "working"
+                            : s.working ? "working"
                             : "idle";
                         termDot.className = `terminal-status-dot ${statusClass} provider-${provider}`;
                     }
                 }
+                refreshCurrentTaskPanelFromLiveSessions();
             }
         }
     };

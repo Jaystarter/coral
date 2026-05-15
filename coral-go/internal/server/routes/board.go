@@ -196,7 +196,7 @@ func (h *BoardHandler) PostMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-subscribe the poster if 'as' is provided and they aren't subscribed yet
 	if body.As != "" && subscriberID != "" {
-		sub, _ := h.bs.GetSubscription(r.Context(), subscriberID)
+		sub, _ := h.bs.GetSubscriptionForProject(r.Context(), project, subscriberID)
 		if sub == nil {
 			h.bs.Subscribe(r.Context(), project, subscriberID, body.As, "", nil, nil, "all")
 		}
@@ -660,7 +660,7 @@ func (h *BoardHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 				if assignee != "" {
 					hasActive, _ := h.bs.HasActiveTaskForAssignee(ctx, project, assignee, task.ID)
 					if !hasActive {
-						sub, err := h.bs.GetSubscription(ctx, assignee)
+						sub, err := h.bs.GetSubscriptionForProject(ctx, project, assignee)
 						if err == nil && sub != nil && sub.SessionName != "" {
 							if err := h.terminal.SendInput(ctx, sub.SessionName, taskNudge, "", ""); err != nil {
 								slog.Warn("failed to nudge agent", "subscriber", assignee, "session", sub.SessionName, "error", err)
@@ -860,7 +860,7 @@ func (h *BoardHandler) CompleteTaskByID(w http.ResponseWriter, r *http.Request) 
 			h.bs.PostMessage(ctx, project, "Coral Task Queue", auditMsg, nil)
 
 			if h.terminal != nil {
-				sub, err := h.bs.GetSubscription(ctx, subscriberID)
+				sub, err := h.bs.GetSubscriptionForProject(ctx, project, subscriberID)
 				if err == nil && sub != nil && sub.SessionName != "" {
 					if err := h.terminal.SendInput(ctx, sub.SessionName, taskNudge, "", ""); err != nil {
 						slog.Warn("failed to nudge agent", "subscriber", subscriberID, "session", sub.SessionName, "error", err)
@@ -978,7 +978,7 @@ func (h *BoardHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			h.bs.PostMessage(ctx, project, "Coral Task Queue", msg, nil)
 
 			if h.terminal != nil && assignee != "" {
-				sub, err := h.bs.GetSubscription(ctx, assignee)
+				sub, err := h.bs.GetSubscriptionForProject(ctx, project, assignee)
 				if err == nil && sub != nil && sub.SessionName != "" {
 					h.terminal.SendInput(ctx, sub.SessionName, taskNudge, "", "")
 				}
@@ -1070,7 +1070,7 @@ func (h *BoardHandler) PublishTask(w http.ResponseWriter, r *http.Request) {
 			if h.terminal != nil && assignee != "" {
 				hasActive, _ := h.bs.HasActiveTaskForAssignee(ctx, project, assignee, task.ID)
 				if !hasActive {
-					sub, err := h.bs.GetSubscription(ctx, assignee)
+					sub, err := h.bs.GetSubscriptionForProject(ctx, project, assignee)
 					if err == nil && sub != nil && sub.SessionName != "" {
 						h.terminal.SendInput(ctx, sub.SessionName, taskNudge, "", "")
 					}
@@ -1100,7 +1100,7 @@ func (h *BoardHandler) notifyUnblockedTasks(ctx context.Context, project string,
 
 		// Send terminal nudge to assignee
 		if h.terminal != nil && assignee != "" {
-			sub, err := h.bs.GetSubscription(ctx, assignee)
+			sub, err := h.bs.GetSubscriptionForProject(ctx, t.BoardID, assignee)
 			if err == nil && sub != nil && sub.SessionName != "" {
 				if err := h.terminal.SendInput(ctx, sub.SessionName, taskNudge, "", ""); err != nil {
 					slog.Warn("failed to nudge unblocked agent", "subscriber", assignee, "session", sub.SessionName, "error", err)

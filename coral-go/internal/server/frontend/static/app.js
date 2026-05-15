@@ -13,7 +13,7 @@ import { syncPaneWidth, refreshCapture } from './capture.js';
 import { showLaunchModal, hideLaunchModal, launchSession, showInfoModal, hideInfoModal, copyInfoCommand, showResumeModal, hideResumeModal, resumeLaunchNew, showSettingsModal, hideSettingsModal, applySettings, loadSettings, toggleFlag, showAddAgentToBoard, hideAddAgentBoardModal, launchAgentToBoard, launchTerminalToBoard, launchDefaultAgent, showAddStandaloneAgent, launchStandaloneTerminal, exportPersonas, importPersonas, exportTeamTemplates, importTeamTemplates, showDefaultPromptsModal, hideDefaultPromptsModal, resetDefaultPrompt, saveDefaultPrompts, deactivateLicense } from './modals.js';
 import { toggleBrowser, browserNavigateTo, browserNavigateUp } from './browser.js';
 import { initSidebarResize, initCommandPaneResize, initTaskBarResize, initBoardChatResize, initSidebarCollapse, switchJobsSubtab, initAgenticPanelCollapse, toggleAgenticPanel, initAgenticBlockResize, initAgenticBlockCollapse } from './sidebar.js';
-import { fitTerminal, getTerminal, connectTerminalWs, disconnectTerminalWs } from './xterm_renderer.js';
+import { fitTerminal, getTerminal, connectTerminalWs, disconnectTerminalWs, openMarkdownTableReader } from './xterm_renderer.js';
 import { loadSessionNotes, saveNotes, generateSummary, resummarize, toggleNotesEdit, cancelNotesEdit, switchHistoryTab } from './notes.js';
 import { loadSessionTags, addTagToSession, removeTagFromSession, showTagDropdown, hideTagDropdown, createTag, loadAllTags } from './tags.js';
 import { loadSessionCommits } from './commits.js';
@@ -79,7 +79,7 @@ Object.assign(window, {
     // sessions
     selectLiveSession, selectHistorySession, editAndResubmit, renameAgent, setAgentIcon,
     // xterm
-    getTerminal, connectTerminalWs, disconnectTerminalWs,
+    getTerminal, connectTerminalWs, disconnectTerminalWs, openMarkdownTableReader,
     // notes
     loadSessionNotes, saveNotes, generateSummary, resummarize, toggleNotesEdit, cancelNotesEdit, switchHistoryTab,
     // tags
@@ -194,7 +194,10 @@ function switchNavTab(tab) {
     // Toggle sidebar visibility — full-width views hide the sidebar
     const fullWidthTabs = new Set(['canvas', 'tokens', 'workflows', 'connected-apps']);
     const layout = document.querySelector('.layout');
-    if (layout) layout.classList.toggle('sidebar-hidden', fullWidthTabs.has(tab));
+    if (layout) {
+        layout.classList.toggle('sidebar-hidden', fullWidthTabs.has(tab));
+        layout.classList.toggle('canvas-active', tab === 'canvas');
+    }
 
     // Update tab button states
     document.querySelectorAll('.top-nav-tab').forEach(btn => btn.classList.remove('active'));
@@ -436,34 +439,45 @@ window.browseCommandTemplates = async function() {
 // ── Sidebar kebab menu helpers ───────────────────────────────────────────
 function closeSidebarKebabs() {
     document.querySelectorAll('.sidebar-kebab-menu').forEach(m => m.style.display = 'none');
+    document.querySelectorAll('.sidebar-kebab-menu-portal').forEach(m => m.remove());
 }
 
 function toggleSidebarKebab(btn) {
-    const menu = btn.nextElementSibling;
-    const wasOpen = menu.style.display !== 'none';
+    const sourceMenu = btn.nextElementSibling;
+    if (!sourceMenu) return;
+    const ownerId = btn.dataset.kebabOwner || (btn.dataset.kebabOwner = `kebab-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const existingPortal = document.querySelector(`.sidebar-kebab-menu-portal[data-kebab-owner="${ownerId}"]`);
+    const wasOpen = !!existingPortal;
     closeSidebarKebabs();
-    if (!wasOpen) {
-        // Show off-screen first to measure, then position
-        menu.style.visibility = 'hidden';
-        menu.style.display = 'block';
-        const rect = btn.getBoundingClientRect();
-        const menuHeight = menu.offsetHeight || 150;
-        const menuWidth = menu.offsetWidth || 160;
-        const viewportHeight = window.innerHeight;
-        const viewportWidth = window.innerWidth;
-        // If menu would overflow the bottom, position above the button
-        if (rect.bottom + menuHeight + 4 > viewportHeight) {
-            menu.style.top = Math.max(4, rect.top - menuHeight - 2) + 'px';
-        } else {
-            menu.style.top = rect.bottom + 2 + 'px';
-        }
-        // Clamp left so menu doesn't overflow right edge
-        const left = Math.min(rect.left, viewportWidth - menuWidth - 8);
-        menu.style.left = Math.max(4, left) + 'px';
-        menu.style.visibility = '';
-        // Hide any visible tooltips so they don't cover the menu
-        document.querySelectorAll('.session-tooltip').forEach(t => t.style.display = 'none');
+    if (wasOpen) return;
+
+    // Render the active menu in a body-level portal so clipped team cards,
+    // scroll containers, and decorative overlays cannot cover it.
+    const menu = sourceMenu.cloneNode(true);
+    menu.classList.add('sidebar-kebab-menu-portal');
+    menu.dataset.kebabOwner = ownerId;
+    menu.style.visibility = 'hidden';
+    menu.style.display = 'block';
+    document.body.appendChild(menu);
+
+    const rect = btn.getBoundingClientRect();
+    const menuHeight = menu.offsetHeight || 150;
+    const menuWidth = menu.offsetWidth || 160;
+    const viewportHeight = window.innerHeight;
+    const viewportWidth = window.innerWidth;
+    const gutter = 8;
+
+    if (rect.bottom + menuHeight + gutter > viewportHeight) {
+        menu.style.top = Math.max(gutter, rect.top - menuHeight - 4) + 'px';
+    } else {
+        menu.style.top = Math.min(viewportHeight - menuHeight - gutter, rect.bottom + 4) + 'px';
     }
+
+    const preferredLeft = rect.right - menuWidth;
+    menu.style.left = Math.max(gutter, Math.min(preferredLeft, viewportWidth - menuWidth - gutter)) + 'px';
+    menu.style.visibility = '';
+
+    document.querySelectorAll('.session-tooltip').forEach(t => t.style.display = 'none');
 }
 
 Object.assign(window, {

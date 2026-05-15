@@ -1,7 +1,7 @@
 /* xterm.js terminal renderer — streams raw ANSI output via WebSocket */
 
 import { state } from './state.js';
-import { dbg, openExternalUrl } from './utils.js';
+import { dbg, escapeHtml, openExternalUrl, renderMarkdown, showToast } from './utils.js';
 import { LOCAL_PREVIEW_EXT_PATTERN, extractLocalPreviewLinks, openLocalFilePreview } from './changed_files.js';
 
 let terminal = null;
@@ -20,6 +20,10 @@ let _fallbackSubmittedMarkerTimer = null;
 let _submittedCommandRenderTimer = null;
 let _submittedCommandRenderNeedsSearch = false;
 let _operatorInputBuffer = "";
+let _operatorInputStartAnchor = null;
+let _operatorInputStartMarker = null;
+let _markdownAssistTimer = null;
+let _markdownAssistState = null;
 
 const SUBMITTED_COMMAND_STORAGE_KEY = "coral.submittedCommands.v1";
 const SUBMITTED_COMMAND_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -27,6 +31,8 @@ const MAX_SUBMITTED_COMMANDS_PER_SESSION = 80;
 const MAX_RESTORED_COMMAND_DECORATIONS = 10;
 const MAX_STORED_COMMAND_CHARS = 12000;
 const TERMINAL_REPLAY_CHUNK_BYTES = 12 * 1024;
+const MARKDOWN_TABLE_SCAN_MARGIN = 10;
+const SUBMITTED_COMMAND_VALIDATION_DELAYS = [90, 220, 420, 760, 1250, 2100, 3600];
 
 // Input queue: buffers keystrokes while WebSocket is disconnected
 let _inputQueue = [];
@@ -386,10 +392,16 @@ export function createTerminal(containerEl) {
 
     terminal.open(containerEl);
     _onRenderDisposable = typeof terminal.onRender === "function"
-        ? terminal.onRender(() => _queueSubmittedCommandOverlayRender({ delay: 48, allowSearch: false }))
+        ? terminal.onRender(() => {
+            _queueSubmittedCommandOverlayRender({ delay: 48, allowSearch: false });
+            _queueMarkdownAssistScan(220);
+        })
         : null;
     _onScrollDisposable = typeof terminal.onScroll === "function"
-        ? terminal.onScroll(() => _queueSubmittedCommandOverlayRender({ delay: 64, allowSearch: false }))
+        ? terminal.onScroll(() => {
+            _queueSubmittedCommandOverlayRender({ delay: 64, allowSearch: false });
+            _queueMarkdownAssistScan(160);
+        })
         : null;
     dbg('terminal.open() done, container:', containerEl.offsetWidth, 'x', containerEl.offsetHeight,
         'display:', containerEl.style.display, 'cols:', terminal.cols, 'rows:', terminal.rows);
@@ -689,6 +701,7 @@ export function connectTerminalWs(name, agentType, sessionId) {
                     terminal.clear();
                     terminal.reset();
                     _clearSubmittedCommandDecorations();
+                    _hideMarkdownAssist();
                 }
                 _writeTerminalData(new Uint8Array(event.data), (completed) => {
                     if (!completed || myGeneration !== _wsGeneration || state.currentSession?.session_id !== sessionId) {
@@ -701,6 +714,7 @@ export function connectTerminalWs(name, agentType, sessionId) {
                         _queueSubmittedCommandOverlayRender();
                     }
                     _refreshTerminalViewport();
+                    _queueMarkdownAssistScan(wasReplaySeed ? 260 : 180);
                     if (_needsScrollToBottom) {
                         terminal.scrollToBottom();
                         // Keep scrolling to bottom for 500ms after connect
@@ -776,6 +790,23 @@ export function disconnectTerminalWs() {
     }
 }
 
+export function showSleepingTerminalState() {
+    disconnectTerminalWs();
+    _paneClosed = true;
+    _restarting = false;
+    _needsScrollToBottom = false;
+    _pendingTerminalReplay = false;
+    _finishTerminalReplayWait();
+    _setDisconnectedBadge(false);
+    _setSessionEndedOverlay(false);
+    _clearSubmittedCommandDecorations();
+    _hideMarkdownAssist();
+    if (terminal) {
+        terminal.clear();
+        terminal.reset();
+    }
+}
+
 export function disposeTerminal() {
     dbg('disposeTerminal', { hadTerminal: !!terminal });
     disconnectTerminalWs();
@@ -805,6 +836,9 @@ export function disposeTerminal() {
     }
     _terminalFocused = false;
     _inputQueue = [];
+    _operatorInputBuffer = "";
+    _operatorInputStartAnchor = null;
+    _disposeOperatorInputStartMarker();
     _finishTerminalReplayWait();
     _clearSubmittedCommandDecorations();
     if (_resizeObserver) {
@@ -841,6 +875,10 @@ export function focusTerminal() {
 }
 
 export function markCommandSubmitted(command) {
+    return _markCommandSubmitted(command, null);
+}
+
+function _markCommandSubmitted(command, startAnchor = null, startMarker = null) {
     const label = "YOU SENT";
     const container = _getXtermContainer();
     _rememberSubmittedCommandForSession(command);
@@ -849,13 +887,18 @@ export function markCommandSubmitted(command) {
         return;
     }
 
+    const anchor = startAnchor || _getCurrentTerminalCursorAnchor();
+    const marker = startMarker || _createCurrentTerminalMarker();
     const entry = {
         command: String(command || ""),
         normalized: _normalizeTerminalSearchText(command),
         compact: _compactTerminalSearchText(command),
         label,
-        lineCount: _estimateSubmittedCommandHeight(command),
+        lineCount: _estimateSubmittedCommandHeight(command, anchor?.column),
         needles: _buildSubmittedCommandNeedles(command),
+        startRange: _getSubmittedCommandStartRange(command, anchor),
+        startMarker: marker,
+        decoration: null,
         bufferRange: null,
         scanAttempted: false,
         freshHighlight: true,
@@ -863,16 +906,24 @@ export function markCommandSubmitted(command) {
         element: null,
         retryTimers: [],
     };
-    entry.element = _createSubmittedCommandOverlay(entry);
-    container.appendChild(entry.element);
+    entry.decoration = _createSubmittedCommandDecoration(entry);
+    if (!entry.decoration) {
+        entry.element = _createSubmittedCommandOverlay(entry);
+        container.appendChild(entry.element);
+    }
 
     _submittedCommandDecorations.push(entry);
     while (_submittedCommandDecorations.length > 60) {
         _disposeSubmittedCommandDecoration(_submittedCommandDecorations.shift());
     }
 
-    _renderSubmittedCommandOverlay(entry, { allowSearch: true });
-    _scheduleSubmittedCommandOverlayRenders(entry);
+    if (entry.decoration) {
+        terminal?.refresh?.(0, Math.max(0, (terminal.rows || 1) - 1));
+        _scheduleSubmittedCommandDecorationValidation(entry);
+    } else {
+        _renderSubmittedCommandOverlay(entry, { allowSearch: true });
+        _scheduleSubmittedCommandOverlayRenders(entry);
+    }
 }
 
 function _restoreSubmittedCommandDecorations() {
@@ -895,6 +946,9 @@ function _restoreSubmittedCommandDecorations() {
             label: "YOU SENT",
             lineCount: _estimateSubmittedCommandHeight(record.command),
             needles: _buildSubmittedCommandNeedles(record.command),
+            startRange: null,
+            startMarker: null,
+            decoration: null,
             bufferRange: null,
             scanAttempted: false,
             freshHighlight: false,
@@ -918,6 +972,10 @@ function _disposeSubmittedCommandDecoration(entry) {
     if (!entry) return;
     for (const timer of entry.retryTimers || []) clearTimeout(timer);
     entry.retryTimers = [];
+    entry.decoration?.dispose?.();
+    entry.decoration = null;
+    entry.startMarker?.dispose?.();
+    entry.startMarker = null;
     entry.element?.remove?.();
     entry.element = null;
 }
@@ -1073,16 +1131,30 @@ function _trackOperatorTerminalInput(data) {
         const ch = normalizedText[i];
         if (ch === "\r" || ch === "\n") {
             const command = _operatorInputBuffer.trim();
+            const startAnchor = _operatorInputStartAnchor;
+            const startMarker = _operatorInputStartMarker;
             _operatorInputBuffer = "";
-            if (command) markCommandSubmitted(command);
+            _operatorInputStartAnchor = null;
+            _operatorInputStartMarker = null;
+            if (command) {
+                _markCommandSubmitted(command, startAnchor, startMarker);
+            } else {
+                startMarker?.dispose?.();
+            }
             continue;
         }
         if (ch === "\x7f" || ch === "\b") {
             _operatorInputBuffer = _operatorInputBuffer.slice(0, -1);
+            if (!_operatorInputBuffer) {
+                _operatorInputStartAnchor = null;
+                _disposeOperatorInputStartMarker();
+            }
             continue;
         }
         if (ch === "\x03" || ch === "\x15") {
             _operatorInputBuffer = "";
+            _operatorInputStartAnchor = null;
+            _disposeOperatorInputStartMarker();
             continue;
         }
         if (ch === "\x1b") {
@@ -1095,6 +1167,10 @@ function _trackOperatorTerminalInput(data) {
             continue;
         }
         if (ch === "\t" || ch >= " ") {
+            if (!_operatorInputBuffer && !_operatorInputStartAnchor) {
+                _operatorInputStartAnchor = _getCurrentTerminalCursorAnchor();
+                _operatorInputStartMarker = _createCurrentTerminalMarker();
+            }
             _operatorInputBuffer += ch;
             if (_operatorInputBuffer.length > MAX_STORED_COMMAND_CHARS) {
                 _operatorInputBuffer = _operatorInputBuffer.slice(-MAX_STORED_COMMAND_CHARS);
@@ -1103,17 +1179,60 @@ function _trackOperatorTerminalInput(data) {
     }
 }
 
-function _estimateSubmittedCommandHeight(command) {
-    const cols = Math.max((terminal?.cols || 80) - 4, 1);
+function _estimateSubmittedCommandHeight(command, startColumn = 4) {
+    const cols = Math.max(terminal?.cols || 80, 1);
+    const safeStartColumn = Math.max(0, Math.min(cols - 1, Number(startColumn) || 0));
     const lines = String(command || "").split(/\r?\n/);
-    const wrappedRows = lines.reduce((total, line) => {
-        return total + Math.max(1, Math.ceil((line.length + 4) / cols));
+    const wrappedRows = lines.reduce((total, line, index) => {
+        const initialColumn = index === 0 ? safeStartColumn : 0;
+        return total + Math.max(1, Math.ceil((initialColumn + line.length) / cols));
     }, 0);
     return _clampSubmittedCommandHeight(wrappedRows);
 }
 
 function _clampSubmittedCommandHeight(value) {
     return Math.max(1, Math.min(32, Number.isFinite(value) ? Math.ceil(value) : 1));
+}
+
+function _getCurrentTerminalCursorAnchor() {
+    const buffer = terminal?.buffer?.active;
+    if (!buffer) return null;
+
+    const baseY = Number(buffer.baseY || 0);
+    const cursorY = Number(buffer.cursorY || 0);
+    const cursorX = Number(buffer.cursorX || 0);
+    if (!Number.isFinite(baseY) || !Number.isFinite(cursorY) || !Number.isFinite(cursorX)) return null;
+
+    return {
+        line: Math.max(0, baseY + cursorY),
+        column: Math.max(0, cursorX),
+    };
+}
+
+function _createCurrentTerminalMarker() {
+    if (!terminal || typeof terminal.registerMarker !== "function") return null;
+    try {
+        return terminal.registerMarker(0) || null;
+    } catch (err) {
+        console.warn("Failed to register submitted command marker", err);
+        return null;
+    }
+}
+
+function _disposeOperatorInputStartMarker() {
+    _operatorInputStartMarker?.dispose?.();
+    _operatorInputStartMarker = null;
+}
+
+function _getSubmittedCommandStartRange(command, startAnchor) {
+    if (!startAnchor || !Number.isFinite(Number(startAnchor.line))) return null;
+    const startLine = Math.max(0, Number(startAnchor.line));
+    const lineCount = _estimateSubmittedCommandHeight(command, startAnchor.column);
+    return {
+        startLine,
+        endLine: startLine + lineCount - 1,
+        source: "input-start",
+    };
 }
 
 function _normalizeTerminalSearchText(value) {
@@ -1126,6 +1245,316 @@ function _compactTerminalSearchText(value) {
 
 function _getXtermContainer() {
     return document.getElementById("xterm-container") || terminal?.element?.parentElement || null;
+}
+
+function _queueMarkdownAssistScan(delay = 180) {
+    clearTimeout(_markdownAssistTimer);
+    _markdownAssistTimer = setTimeout(() => {
+        _markdownAssistTimer = null;
+        _scanMarkdownAssist();
+    }, delay);
+}
+
+function _scanMarkdownAssist() {
+    const container = _getXtermContainer();
+    if (!terminal || !_isTerminalContainerMeasurable(container)) {
+        _hideMarkdownAssist();
+        return;
+    }
+
+    const tables = _findVisibleMarkdownTables();
+    _markdownAssistState = tables[0] || null;
+    _renderMarkdownAssistChips(tables);
+}
+
+export function openMarkdownTableReader() {
+    const table = _findVisibleMarkdownTable() || _findLatestMarkdownTable();
+    if (!table) {
+        showToast("No Markdown table found in this terminal", true);
+        return false;
+    }
+    _markdownAssistState = table;
+    _renderMarkdownAssistChips(_findVisibleMarkdownTables());
+    _openMarkdownTableReader(table);
+    return true;
+}
+
+function _hideMarkdownAssist() {
+    _markdownAssistState = null;
+    const container = _getXtermContainer();
+    container?.querySelectorAll(".xterm-markdown-reader-chip").forEach(chip => chip.remove());
+}
+
+function _renderMarkdownAssistChips(tables) {
+    const container = _getXtermContainer();
+    if (!container) return;
+
+    const positioned = _positionMarkdownAssistTables(tables);
+    const existing = Array.from(container.querySelectorAll(".xterm-markdown-reader-chip"));
+    existing.forEach(chip => chip.remove());
+
+    positioned.forEach(({ table, top }, index) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "xterm-markdown-reader-chip is-localized is-visible";
+        chip.style.top = `${top}px`;
+        chip.dataset.tableIndex = String(index);
+        chip.addEventListener("click", () => {
+            _markdownAssistState = table;
+            _openMarkdownTableReader(table);
+        });
+        chip.innerHTML = `
+            <span class="material-icons" aria-hidden="true">table_chart</span>
+            <strong>View table</strong>
+            <small>${escapeHtml(String(table.dataRows))} rows</small>
+        `;
+        container.appendChild(chip);
+    });
+}
+
+function _positionMarkdownAssistTables(tables) {
+    if (!tables?.length) return [];
+    const container = _getXtermContainer();
+    const rowsContainer = terminal?.element?.querySelector(".xterm-rows")
+        || document.querySelector("#xterm-container .xterm-rows");
+    if (!container || !rowsContainer) return [];
+
+    const rows = Array.from(rowsContainer.children).filter(row => row instanceof HTMLElement);
+    if (!rows.length) return [];
+
+    const viewportY = terminal?.buffer?.active?.viewportY || 0;
+    const containerRect = container.getBoundingClientRect();
+    const minTop = 18;
+    const maxTop = Math.max(minTop, container.offsetHeight - 52);
+    const usedTops = [];
+
+    return tables.map((table) => {
+        const visibleStart = Math.max(0, table.startLine - viewportY);
+        const visibleEnd = Math.min(rows.length - 1, table.endLine - viewportY);
+        const rowIndex = Math.max(0, Math.min(rows.length - 1, visibleStart <= visibleEnd ? visibleStart : table.startLine - viewportY));
+        const row = rows[rowIndex];
+        if (!row) return null;
+
+        const rowRect = row.getBoundingClientRect();
+        let top = rowRect.top - containerRect.top - 6;
+        top = Math.max(minTop, Math.min(maxTop, top));
+        while (usedTops.some(used => Math.abs(used - top) < 38)) top = Math.min(maxTop, top + 38);
+        usedTops.push(top);
+        return { table, top };
+    }).filter(Boolean);
+}
+
+function _openMarkdownTableReader(table = _markdownAssistState) {
+    if (!table) {
+        showToast("No Markdown table is visible in the terminal", true);
+        return;
+    }
+
+    const container = _getXtermContainer();
+    if (!container) return;
+
+    let overlay = container.querySelector(".xterm-markdown-reader");
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.className = "xterm-markdown-reader";
+        container.appendChild(overlay);
+    }
+
+    overlay.innerHTML = `
+        <section class="xterm-markdown-reader-panel" role="dialog" aria-modal="false" aria-label="Rendered Markdown table">
+            <header class="xterm-markdown-reader-header">
+                <span>
+                    <small>Terminal reader</small>
+                    <strong>Markdown table</strong>
+                </span>
+                <div class="xterm-markdown-reader-actions">
+                    <button type="button" class="xterm-markdown-reader-copy">Copy Markdown</button>
+                    <button type="button" class="xterm-markdown-reader-close" aria-label="Close table reader">
+                        <span class="material-icons" aria-hidden="true">close</span>
+                    </button>
+                </div>
+            </header>
+            <div class="xterm-markdown-reader-body markdown-body">
+                ${renderMarkdown(table.markdown)}
+            </div>
+        </section>
+    `;
+
+    overlay.querySelector(".xterm-markdown-reader-close")?.addEventListener("click", () => overlay.remove());
+    overlay.querySelector(".xterm-markdown-reader-copy")?.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(table.markdown);
+            showToast("Copied table Markdown");
+        } catch {
+            showToast("Failed to copy table", true);
+        }
+    });
+    overlay.onclick = (event) => {
+        if (event.target === overlay) overlay.remove();
+    };
+}
+
+function _findVisibleMarkdownTable() {
+    const tables = _findVisibleMarkdownTables();
+    return tables[0] || null;
+}
+
+function _findVisibleMarkdownTables() {
+    const buffer = terminal?.buffer?.active;
+    if (!buffer) return [];
+
+    const viewportY = Number(buffer.viewportY) || 0;
+    const rows = Number(terminal?.rows) || 0;
+    const lineCount = buffer.length || (buffer.baseY || 0) + rows;
+    const start = Math.max(0, viewportY - MARKDOWN_TABLE_SCAN_MARGIN);
+    const end = Math.min(lineCount, viewportY + rows + MARKDOWN_TABLE_SCAN_MARGIN);
+    return _findMarkdownTablesInRange(start, end).filter(table => (
+        table.endLine >= viewportY && table.startLine <= viewportY + rows
+    ));
+}
+
+function _findLatestMarkdownTable() {
+    const buffer = terminal?.buffer?.active;
+    if (!buffer) return null;
+    const rows = Number(terminal?.rows) || 0;
+    const lineCount = buffer.length || (buffer.baseY || 0) + rows;
+    const start = Math.max(0, lineCount - 2500);
+    return _findMarkdownTablesInRange(start, lineCount).at(-1) || null;
+}
+
+function _findMarkdownTablesInRange(start, end) {
+    const logicalLines = _getLogicalTerminalLines(start, end);
+    const tables = [];
+    for (let i = 1; i < logicalLines.length; i += 1) {
+        const separator = _normaliseMarkdownTableRow(logicalLines[i].text);
+        if (!_isMarkdownTableSeparator(separator)) continue;
+
+        const header = _buildWrappedTableHeader(logicalLines, i);
+        if (!_isMarkdownTableRow(header)) continue;
+
+        const expectedCells = _markdownTableCellCount(separator);
+        const rowsOut = [header, separator];
+        let j = i + 1;
+        let tableEndLine = logicalLines[i].lineIndex;
+        while (j < logicalLines.length) {
+            const built = _buildWrappedTableDataRow(logicalLines, j, expectedCells);
+            const row = _normaliseMarkdownTableRow(built.text);
+            if (!_isMarkdownTableRow(row) || _isMarkdownTableSeparator(row)) break;
+            rowsOut.push(row);
+            tableEndLine = built.endLine ?? logicalLines[j].lineIndex;
+            j = Math.max(j + 1, built.nextIndex);
+        }
+
+        if (rowsOut.length < 3) continue;
+        const table = {
+            markdown: rowsOut.join("\n"),
+            dataRows: rowsOut.length - 2,
+            startLine: logicalLines[Math.max(0, i - 1)].lineIndex,
+            endLine: tableEndLine,
+        };
+        tables.push(table);
+        i = Math.max(i, j - 1);
+    }
+    return tables;
+}
+
+function _buildWrappedTableHeader(lines, separatorIndex) {
+    const parts = [];
+    for (let i = separatorIndex - 1; i >= 0 && i >= separatorIndex - 3; i -= 1) {
+        const text = String(lines[i]?.text || "").trim();
+        if (!text || !text.includes("|") || _isMarkdownTableSeparator(_normaliseMarkdownTableRow(text))) break;
+        parts.unshift(text);
+        if (text.startsWith("|")) break;
+    }
+    return _normaliseMarkdownTableRow(parts.join(" "));
+}
+
+function _buildWrappedTableDataRow(lines, startIndex, expectedCells = 0) {
+    const parts = [];
+    let nextIndex = startIndex + 1;
+    let endLine = lines[startIndex]?.lineIndex ?? startIndex;
+    for (let i = startIndex; i < lines.length && i < startIndex + 6; i += 1) {
+        const text = String(lines[i]?.text || "").trim();
+        if (!text) break;
+        const hasPipe = text.includes("|");
+        const startsNextRow = parts.length > 0 && text.startsWith("|") && _isCompleteMarkdownTableRow(_normaliseMarkdownTableRow(parts.join(" ")), expectedCells);
+        if (startsNextRow) break;
+        if (!hasPipe && parts.length === 0) break;
+        if (!hasPipe && _isCompleteMarkdownTableRow(_normaliseMarkdownTableRow(parts.join(" ")), expectedCells)) break;
+        parts.push(text);
+        nextIndex = i + 1;
+        endLine = lines[i]?.lineIndex ?? endLine;
+        const row = _normaliseMarkdownTableRow(parts.join(" "));
+        if (_isCompleteMarkdownTableRow(row, expectedCells)) break;
+    }
+    return { text: parts.join(" "), nextIndex, endLine };
+}
+
+function _getLogicalTerminalLines(start, end) {
+    const buffer = terminal?.buffer?.active;
+    const lines = [];
+    let current = null;
+
+    for (let i = start; i < end; i += 1) {
+        const line = buffer?.getLine(i);
+        if (!line) continue;
+        const text = line.translateToString(true);
+        if (current && line.isWrapped) {
+            current.text += text;
+            current.lineIndex = i;
+        } else {
+            if (current) lines.push(current);
+            current = { text, lineIndex: i };
+        }
+    }
+    if (current) lines.push(current);
+    return lines;
+}
+
+function _normaliseMarkdownTableRow(line) {
+    let text = String(line || "").trim();
+    const firstPipe = text.indexOf("|");
+    const lastPipe = text.lastIndexOf("|");
+    if (firstPipe < 0 || lastPipe <= firstPipe) return text;
+    text = text.slice(firstPipe, lastPipe + 1);
+    return text.replace(/\s+/g, " ").trim();
+}
+
+function _markdownTableCells(line) {
+    const text = String(line || "").trim();
+    if (!text.includes("|")) return [];
+    const cells = text.split("|").map(cell => cell.trim());
+    if (text.startsWith("|")) cells.shift();
+    if (text.endsWith("|")) cells.pop();
+    return cells;
+}
+
+function _markdownTableCellCount(line) {
+    return _markdownTableCells(line).length;
+}
+
+function _isMarkdownTableRow(line) {
+    const text = String(line || "").trim();
+    if (!text.includes("|")) return false;
+    const cells = _markdownTableCells(text);
+    const contentCells = cells.filter(Boolean);
+    return contentCells.length >= 2;
+}
+
+function _isMarkdownTableSeparator(line) {
+    const text = String(line || "").trim();
+    if (!text.includes("|")) return false;
+    const cells = _markdownTableCells(text).filter(Boolean);
+    return cells.length >= 2 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+}
+
+function _isCompleteMarkdownTableRow(line, expectedCells = 0) {
+    const text = String(line || "").trim();
+    if (!_isMarkdownTableRow(text) || _isMarkdownTableSeparator(text)) return false;
+    const cells = _markdownTableCellCount(text);
+    if (expectedCells > 0 && cells < expectedCells) return false;
+    if (text.startsWith("|") && text.endsWith("|")) return true;
+    return expectedCells > 0 && cells >= expectedCells && (text.match(/\|/g) || []).length >= expectedCells;
 }
 
 function _buildSubmittedCommandNeedles(command) {
@@ -1149,6 +1578,113 @@ function _createSubmittedCommandOverlay(entry) {
     el.setAttribute("aria-label", "Submitted by you");
     el.dataset.operatorLabel = entry.label;
     return el;
+}
+
+function _createSubmittedCommandDecoration(entry) {
+    if (!terminal || typeof terminal.registerDecoration !== "function" || !entry?.startMarker) return null;
+    if (entry.startMarker.isDisposed) return null;
+
+    try {
+        const decoration = terminal.registerDecoration({
+            marker: entry.startMarker,
+            x: 0,
+            width: Math.max(1, terminal.cols || 1),
+            height: Math.max(1, entry.lineCount || 1),
+            layer: "top",
+        });
+        if (!decoration) return null;
+
+        decoration.onRender((el) => {
+            if (!el) return;
+            entry.element = el;
+            el.classList.add("xterm-operator-send-marker", "is-visible", "is-buffer-decoration");
+            el.setAttribute("aria-label", "Submitted by you");
+            el.dataset.operatorLabel = entry.label;
+            if (!entry.hasBeenVisible) {
+                entry.hasBeenVisible = true;
+                if (entry.freshHighlight) {
+                    el.classList.add("is-fresh");
+                    entry.retryTimers.push(setTimeout(() => {
+                        el.classList.remove("is-fresh");
+                    }, 1800));
+                }
+            }
+        });
+        return decoration;
+    } catch (err) {
+        console.warn("Failed to register submitted command decoration", err);
+        return null;
+    }
+}
+
+function _scheduleSubmittedCommandDecorationValidation(entry) {
+    for (let i = 0; i < SUBMITTED_COMMAND_VALIDATION_DELAYS.length; i += 1) {
+        const delay = SUBMITTED_COMMAND_VALIDATION_DELAYS[i];
+        const finalPass = i === SUBMITTED_COMMAND_VALIDATION_DELAYS.length - 1;
+        const timer = setTimeout(() => {
+            _validateSubmittedCommandDecoration(entry, { finalPass });
+        }, delay);
+        entry.retryTimers.push(timer);
+    }
+}
+
+function _getSubmittedCommandMarkerRange(entry) {
+    if (!entry?.startMarker || entry.startMarker.isDisposed) return null;
+    const startLine = Number(entry.startMarker.line);
+    if (!Number.isFinite(startLine) || startLine < 0) return null;
+    const lineCount = Math.max(1, entry.lineCount || 1);
+    return {
+        startLine,
+        endLine: startLine + lineCount - 1,
+        source: "marker",
+    };
+}
+
+function _validateSubmittedCommandDecoration(entry, { finalPass = false } = {}) {
+    if (!entry || !entry.decoration || !terminal) return false;
+
+    const markerRange = _getSubmittedCommandMarkerRange(entry);
+    if (markerRange && _submittedCommandRangeMatches(entry, markerRange)) {
+        entry.bufferRange = _expandSubmittedCommandBufferRange(markerRange, entry.lineCount);
+        return true;
+    }
+
+    const searchedRange = _findSubmittedCommandBufferRange(entry);
+    entry.scanAttempted = true;
+    if (searchedRange) {
+        entry.bufferRange = _expandSubmittedCommandBufferRange(searchedRange, entry.lineCount);
+        _convertSubmittedCommandDecorationToOverlay(entry);
+        _renderSubmittedCommandOverlay(entry, { allowSearch: true });
+        _scheduleSubmittedCommandOverlayRenders(entry);
+        return true;
+    }
+
+    // A bad decoration is worse than no decoration: it can label model/status
+    // rows as user input. After the terminal has settled, remove it and let the
+    // normal restore/search path rehydrate the marker when the command is found.
+    if (finalPass && markerRange) {
+        _convertSubmittedCommandDecorationToOverlay(entry);
+        _renderSubmittedCommandOverlay(entry, { allowSearch: true });
+        _scheduleSubmittedCommandOverlayRenders(entry);
+    }
+    return false;
+}
+
+function _convertSubmittedCommandDecorationToOverlay(entry) {
+    if (!entry) return null;
+    const container = _getXtermContainer();
+
+    entry.decoration?.dispose?.();
+    entry.decoration = null;
+    entry.startMarker?.dispose?.();
+    entry.startMarker = null;
+    entry.element?.remove?.();
+    entry.element = null;
+
+    if (!container) return null;
+    entry.element = _createSubmittedCommandOverlay(entry);
+    container.appendChild(entry.element);
+    return entry.element;
 }
 
 function _scheduleSubmittedCommandOverlayRenders(entry) {
@@ -1187,6 +1723,7 @@ function _queueSubmittedCommandOverlayRender(options = {}) {
 
 function _renderSubmittedCommandOverlay(entry, { allowSearch = false } = {}) {
     if (!entry || !entry.element) return false;
+    if (entry.decoration) return true;
 
     const container = _getXtermContainer();
     const range = _findSubmittedCommandDomRange(entry, { allowSearch });
@@ -1227,6 +1764,12 @@ function _findSubmittedCommandDomRange(entry, { allowSearch = false } = {}) {
     if (!rowsContainer || !entry?.needles?.length) return null;
 
     const rows = Array.from(rowsContainer.children).filter(row => row instanceof HTMLElement);
+    const shouldSearchVisibleRows = allowSearch || !entry.bufferRange || entry.hasBeenVisible;
+    if (shouldSearchVisibleRows) {
+        const visibleRange = _findSubmittedCommandVisibleRowRange(entry, rowsContainer, rows);
+        if (visibleRange) return visibleRange;
+    }
+
     const bufferRange = _getSubmittedCommandBufferRange(entry, allowSearch);
     if (bufferRange) {
         const viewportY = terminal?.buffer?.active?.viewportY || 0;
@@ -1239,9 +1782,11 @@ function _findSubmittedCommandDomRange(entry, { allowSearch = false } = {}) {
         if (startRow && endRow) return { rowsContainer, startRow, endRow };
     }
 
-    if (!allowSearch) return null;
+    return null;
+}
 
-    // Fallback for older xterm builds where buffer viewport metadata is absent.
+function _findSubmittedCommandVisibleRowRange(entry, rowsContainer, rows) {
+    if (!rows?.length) return null;
     const maxSampleHeight = Math.max(entry.lineCount + 6, 12);
     const candidates = [];
 
@@ -1256,19 +1801,21 @@ function _findSubmittedCommandDomRange(entry, { allowSearch = false } = {}) {
             const sampleCompact = _compactTerminalSearchText(sample);
             const match = _findSubmittedCommandNeedleMatch(entry, sample, sampleCompact);
             if (match) {
-                const rowText = _normalizeTerminalSearchText(rows[start].textContent || "");
-                const rowCompact = _compactTerminalSearchText(rowText);
-                const firstRowMatch = !!_findSubmittedCommandNeedleMatch(entry, rowText, rowCompact);
-                const measuredHeight = match.exact ? height : Math.max(height, entry.lineCount);
-                const end = Math.min(rows.length - 1, start + measuredHeight - 1);
-                const rowRect = rows[start].getBoundingClientRect();
+                const matchOffset = _findSubmittedCommandRowOffset(entry, (offset) => rows[start + offset]?.textContent || "", height);
+                const anchorStart = Math.min(rows.length - 1, start + matchOffset);
+                const measuredHeight = match.exact
+                    ? Math.max(1, height - matchOffset)
+                    : Math.max(entry.lineCount, height - matchOffset);
+                const end = Math.min(rows.length - 1, anchorStart + measuredHeight - 1);
+                const rowRect = rows[anchorStart].getBoundingClientRect();
                 candidates.push({
                     rowsContainer,
-                    startRow: rows[start],
+                    startRow: rows[anchorStart],
                     endRow: rows[end],
                     score:
-                        (firstRowMatch ? 100000 : 0)
+                        (matchOffset === 0 ? 100000 : 0)
                         + (match.exact ? 10000 : 0)
+                        - (matchOffset * 1000)
                         - (measuredHeight * 100)
                         + rowRect.top,
                 });
@@ -1284,13 +1831,69 @@ function _findSubmittedCommandDomRange(entry, { allowSearch = false } = {}) {
 }
 
 function _getSubmittedCommandBufferRange(entry, allowSearch) {
-    if (entry.bufferRange) return entry.bufferRange;
-    if (!allowSearch) return null;
+    if (allowSearch) {
+        const range = _findSubmittedCommandBufferRange(entry);
+        entry.scanAttempted = true;
+        if (range) {
+            entry.bufferRange = _expandSubmittedCommandBufferRange(range, entry.lineCount);
+            return entry.bufferRange;
+        }
+    }
 
-    const range = _findSubmittedCommandBufferRange(entry);
-    entry.scanAttempted = true;
-    if (range) entry.bufferRange = range;
-    return range;
+    if (entry.bufferRange) {
+        return _expandSubmittedCommandBufferRange(entry.bufferRange, entry.lineCount);
+    }
+
+    if (entry.startRange && _submittedCommandRangeMatches(entry, entry.startRange)) {
+        entry.bufferRange = _expandSubmittedCommandBufferRange(entry.startRange, entry.lineCount);
+        return entry.bufferRange;
+    }
+
+    return null;
+}
+
+function _submittedCommandRangeMatches(entry, range) {
+    const buffer = terminal?.buffer?.active;
+    if (!buffer || !range || !entry?.needles?.length) return false;
+
+    const lineCount = buffer.length || ((buffer.baseY || 0) + (terminal?.rows || 0));
+    const startLine = Math.max(0, Math.min(lineCount - 1, range.startLine));
+    const endLine = Math.max(startLine, Math.min(lineCount - 1, range.endLine));
+    const parts = [];
+    for (let i = startLine; i <= endLine; i += 1) {
+        parts.push(buffer.getLine(i)?.translateToString(true) || "");
+    }
+    const sample = _normalizeTerminalSearchText(parts.join(" "));
+    if (!sample) return false;
+    return !!_findSubmittedCommandNeedleMatch(entry, sample, _compactTerminalSearchText(sample));
+}
+
+function _expandSubmittedCommandBufferRange(range, expectedRows = 1) {
+    const buffer = terminal?.buffer?.active;
+    const lineCount = buffer?.length || ((buffer?.baseY || 0) + (terminal?.rows || 0));
+    if (!buffer || !lineCount || !range) return range;
+
+    let startLine = Math.max(0, Math.min(lineCount - 1, range.startLine));
+    let endLine = Math.max(startLine, Math.min(lineCount - 1, range.endLine));
+    const maxExpansion = Math.max(2, Math.min(32, _clampSubmittedCommandHeight(expectedRows) + 4));
+
+    let expandedUp = 0;
+    while (startLine > 0 && expandedUp < maxExpansion) {
+        const line = buffer.getLine(startLine);
+        if (!line?.isWrapped) break;
+        startLine -= 1;
+        expandedUp += 1;
+    }
+
+    let expandedDown = 0;
+    while (endLine + 1 < lineCount && expandedDown < maxExpansion) {
+        const nextLine = buffer.getLine(endLine + 1);
+        if (!nextLine?.isWrapped) break;
+        endLine += 1;
+        expandedDown += 1;
+    }
+
+    return { ...range, startLine, endLine };
 }
 
 function _findSubmittedCommandBufferRange(entry) {
@@ -1318,15 +1921,22 @@ function _findSubmittedCommandBufferRange(entry) {
             const rowText = _normalizeTerminalSearchText(buffer.getLine(start)?.translateToString(true) || "");
             const rowCompact = _compactTerminalSearchText(rowText);
             const firstRowMatch = !!_findSubmittedCommandNeedleMatch(entry, rowText, rowCompact);
-            const measuredHeight = match.exact ? height : Math.max(height, entry.lineCount);
+            const matchOffset = firstRowMatch ? 0 : _findSubmittedCommandRowOffset(entry, (offset) => (
+                buffer.getLine(start + offset)?.translateToString(true) || ""
+            ), height);
+            const anchorStart = Math.min(lineCount - 1, start + matchOffset);
+            const measuredHeight = match.exact
+                ? Math.max(1, height - matchOffset)
+                : Math.max(entry.lineCount, height - matchOffset);
             candidates.push({
-                startLine: start,
-                endLine: Math.min(lineCount - 1, start + measuredHeight - 1),
+                startLine: anchorStart,
+                endLine: Math.min(lineCount - 1, anchorStart + measuredHeight - 1),
                 score:
-                    (firstRowMatch ? 100000 : 0)
+                    (matchOffset === 0 ? 100000 : 0)
                     + (match.exact ? 10000 : 0)
+                    - (matchOffset * 1000)
                     - (measuredHeight * 100)
-                    + start,
+                    + anchorStart,
             });
             break;
         }
@@ -1341,6 +1951,16 @@ function _findSubmittedCommandNeedleMatch(entry, sample, sampleCompact) {
     return entry.needles.find(needle => {
         return needle.compact ? sampleCompact.includes(needle.value) : sample.includes(needle.value);
     });
+}
+
+function _findSubmittedCommandRowOffset(entry, readRow, maxRows) {
+    for (let offset = 0; offset < maxRows; offset += 1) {
+        const rowText = _normalizeTerminalSearchText(readRow(offset) || "");
+        if (!rowText) continue;
+        const rowCompact = _compactTerminalSearchText(rowText);
+        if (_findSubmittedCommandNeedleMatch(entry, rowText, rowCompact)) return offset;
+    }
+    return 0;
 }
 
 function _showFallbackSubmittedMarker(label) {

@@ -2824,6 +2824,7 @@ func (h *SessionsHandler) RecordTokenUsage(w http.ResponseWriter, r *http.Reques
 		OutputTokens:     outputTokens,
 		CacheReadTokens:  cacheReadTokens,
 		CacheWriteTokens: cacheWriteTokens,
+		ContextTokens:    inputTokens + cacheReadTokens + cacheWriteTokens,
 		TotalTokens:      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
 		CostUSD:          body.CostUSD,
 		NumTurns:         int(body.NumTurns),

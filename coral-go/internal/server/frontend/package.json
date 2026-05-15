@@ -1,0 +1,17 @@
+{
+  "name": "coral-frontend-islands",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bundled frontend islands for Coral's vanilla app shell.",
+  "scripts": {
+    "build:canvas": "esbuild canvas-src/mission_canvas_react.jsx --bundle --format=iife --global-name=CoralMissionCanvas --outfile=static/vendor/mission-canvas/react-flow-canvas.js --jsx=automatic --minify"
+  },
+  "dependencies": {
+    "@xyflow/react": "12.10.2",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.0"
+  }
+}

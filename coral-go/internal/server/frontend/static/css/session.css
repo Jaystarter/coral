@@ -245,6 +245,7 @@
 .tt-state-working           { color: #3b82f6; font-weight: 600; }
 .tt-state-needs-input       { color: var(--warning); font-weight: 600; }
 .tt-state-done              { color: var(--success); font-weight: 600; }
+.tt-state-complete          { color: var(--success); font-weight: 600; }
 .tt-state-stuck             { color: var(--danger, #ef4444); font-weight: 600; }
 .tt-state-idle              { color: var(--text-muted); }
 .tt-unread                   { color: var(--warning); font-weight: 600; }
@@ -302,6 +303,17 @@
     color: var(--text-muted);
     opacity: 0.8;
     white-space: nowrap;
+}
+
+.context-token-label {
+    display: inline-block;
+    max-width: 42px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    color: var(--text-muted);
+    opacity: 0.62;
 }
 
 .session-info {
@@ -390,6 +402,13 @@
     padding: 4px 0;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     min-width: 160px;
+}
+
+.sidebar-kebab-menu-portal {
+    z-index: 100000;
+    max-height: min(420px, calc(100vh - 16px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 /* ── Board Card Groups ─────────────────────────────────────── */
@@ -1186,6 +1205,23 @@
     padding: 6px 10px;
     text-align: center;
     flex-shrink: 0;
+}
+
+.board-paused-banner.board-sleeping-banner {
+    color: #ffd166;
+    background: linear-gradient(135deg, rgba(255, 209, 102, 0.14), rgba(154, 115, 255, 0.12));
+    border-bottom-color: rgba(255, 209, 102, 0.35);
+}
+
+#board-chat-pause-btn.team-sleeping {
+    color: #ffd166;
+    border-color: rgba(255, 209, 102, 0.36);
+    background: rgba(255, 209, 102, 0.08);
+}
+
+#board-chat-pause-btn.team-sleeping:hover {
+    color: #ffe6a3;
+    background: rgba(255, 209, 102, 0.14);
 }
 
 .board-chat-title {

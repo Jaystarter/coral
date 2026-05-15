@@ -46,25 +46,25 @@ type GroupInfo struct {
 
 // Task represents a board task.
 type Task struct {
-	ID                int64   `db:"id" json:"id"`
-	BoardID           string  `db:"board_id" json:"board_id"`
-	Title             string  `db:"title" json:"title"`
-	Body              *string `db:"body" json:"body,omitempty"`
-	Status            string  `db:"status" json:"status"`
-	Priority          string  `db:"priority" json:"priority"`
-	CreatedBy         string  `db:"created_by" json:"created_by"`
-	AssignedTo        *string `db:"assigned_to" json:"assigned_to"`
-	CompletedBy       *string `db:"completed_by" json:"completed_by"`
-	CompletionMessage *string `db:"completion_message" json:"completion_message,omitempty"`
-	CreatedAt         string  `db:"created_at" json:"created_at"`
-	ClaimedAt         *string `db:"claimed_at" json:"claimed_at,omitempty"`
-	CompletedAt       *string `db:"completed_at" json:"completed_at,omitempty"`
-	SessionID         *string  `db:"session_id" json:"session_id,omitempty"`
-	CostUSD           *float64 `db:"cost_usd" json:"cost_usd,omitempty"`
-	InputTokens       *int     `db:"input_tokens" json:"input_tokens,omitempty"`
-	OutputTokens      *int     `db:"output_tokens" json:"output_tokens,omitempty"`
-	CacheReadTokens   *int     `db:"cache_read_tokens" json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens  *int     `db:"cache_write_tokens" json:"cache_write_tokens,omitempty"`
+	ID                int64     `db:"id" json:"id"`
+	BoardID           string    `db:"board_id" json:"board_id"`
+	Title             string    `db:"title" json:"title"`
+	Body              *string   `db:"body" json:"body,omitempty"`
+	Status            string    `db:"status" json:"status"`
+	Priority          string    `db:"priority" json:"priority"`
+	CreatedBy         string    `db:"created_by" json:"created_by"`
+	AssignedTo        *string   `db:"assigned_to" json:"assigned_to"`
+	CompletedBy       *string   `db:"completed_by" json:"completed_by"`
+	CompletionMessage *string   `db:"completion_message" json:"completion_message,omitempty"`
+	CreatedAt         string    `db:"created_at" json:"created_at"`
+	ClaimedAt         *string   `db:"claimed_at" json:"claimed_at,omitempty"`
+	CompletedAt       *string   `db:"completed_at" json:"completed_at,omitempty"`
+	SessionID         *string   `db:"session_id" json:"session_id,omitempty"`
+	CostUSD           *float64  `db:"cost_usd" json:"cost_usd,omitempty"`
+	InputTokens       *int      `db:"input_tokens" json:"input_tokens,omitempty"`
+	OutputTokens      *int      `db:"output_tokens" json:"output_tokens,omitempty"`
+	CacheReadTokens   *int      `db:"cache_read_tokens" json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens  *int      `db:"cache_write_tokens" json:"cache_write_tokens,omitempty"`
 	BlockedBy         []TaskDep `db:"-" json:"blocked_by,omitempty"`
 }
 
@@ -419,6 +419,20 @@ func (s *Store) GetSubscription(ctx context.Context, subscriberID string) (*Subs
 	return &sub, err
 }
 
+// GetSubscriptionForProject returns the active subscription for a subscriber
+// on a specific board. This avoids routing task nudges to a same-named agent
+// on a different team.
+func (s *Store) GetSubscriptionForProject(ctx context.Context, project, subscriberID string) (*Subscriber, error) {
+	var sub Subscriber
+	err := s.db.GetContext(ctx, &sub,
+		"SELECT * FROM board_subscribers WHERE project = ? AND subscriber_id = ? AND is_active = 1 ORDER BY subscribed_at DESC LIMIT 1",
+		project, subscriberID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &sub, err
+}
+
 // GetSubscriptionBySessionName returns the active subscription for a specific tmux session.
 // This is more precise than GetSubscription when the same subscriber_id has
 // multiple active subscriptions across different boards.
@@ -601,6 +615,7 @@ func (s *Store) CountMessages(ctx context.Context, project string) (int, error) 
 //   - "all"      → all unread messages from others
 //   - "mentions" → only messages with @notify-all, @<subscriber_id>, or @<job_title>
 //   - anything else → treat as group-id, count only messages from group members
+//
 // mentionTerms returns the canonical list of mention patterns for a subscriber.
 // Used by both CheckUnread (SQL LIKE) and GetAllUnreadCounts (Go string matching).
 func mentionTerms(subscriberID, jobTitle string) []string {
@@ -1302,8 +1317,8 @@ func (s *Store) computeAndStoreTaskCost(ctx context.Context, taskID int64) {
 	}
 	// Fetch the task's session_id and time window.
 	var task struct {
-		SessionID *string `db:"session_id"`
-		ClaimedAt *string `db:"claimed_at"`
+		SessionID   *string `db:"session_id"`
+		ClaimedAt   *string `db:"claimed_at"`
 		CompletedAt *string `db:"completed_at"`
 	}
 	if err := s.db.GetContext(ctx, &task,
@@ -1543,10 +1558,10 @@ func (s *Store) CancelTask(ctx context.Context, project string, taskID int64, su
 // GetTaskDependencies returns the blocked_by deps for a task with title/status populated.
 func (s *Store) GetTaskDependencies(ctx context.Context, taskID int64) ([]TaskDep, error) {
 	var deps []struct {
-		BlockedByTaskID int64  `db:"blocked_by_task_id"`
-		BlockedByBoardID string `db:"blocked_by_board_id"`
-		Title           *string `db:"title"`
-		Status          *string `db:"status"`
+		BlockedByTaskID  int64   `db:"blocked_by_task_id"`
+		BlockedByBoardID string  `db:"blocked_by_board_id"`
+		Title            *string `db:"title"`
+		Status           *string `db:"status"`
 	}
 	err := s.db.SelectContext(ctx, &deps,
 		`SELECT td.blocked_by_task_id, td.blocked_by_board_id, bt.title, bt.status

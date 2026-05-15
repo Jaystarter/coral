@@ -501,6 +501,7 @@ func startBackgroundServices(ctx context.Context, db *store.DB, cfg *config.Conf
 				OutputTokens:     rec.OutputTokens,
 				CacheReadTokens:  rec.CacheReadTokens,
 				CacheWriteTokens: rec.CacheWriteTokens,
+				ContextTokens:    rec.ContextTokens,
 				TotalTokens:      rec.InputTokens + rec.OutputTokens + rec.CacheReadTokens + rec.CacheWriteTokens,
 				CostUSD:          rec.CostUSD,
 				RecordedAt:       rec.RecordedAt,

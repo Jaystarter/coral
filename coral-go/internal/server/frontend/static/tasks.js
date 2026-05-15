@@ -5,22 +5,27 @@ import { escapeHtml, escapeAttr, showToast } from './utils.js';
 
 // ── Board task polling ───────────────────────────────────────────────
 let _boardTaskPollTimer = null;
+const BOARD_TASK_POLL_MS = 3000;
+const BOARD_TASK_WS_REFRESH_MS = 2500;
 // Live cost cache: taskID → { cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, request_count }
 let _liveCosts = {};
 let _boardTaskRequestSeq = 0;
 let _agentTaskRequestSeq = 0;
 let _boardTasksLoading = false;
+let _boardTasksInFlight = false;
 let _boardTasksError = '';
 let _boardTasksBoardName = '';
+let _lastBoardTaskRefreshAt = 0;
+let _lastBoardTaskRefreshBoard = '';
 
 export function startBoardTaskPoll() {
     stopBoardTaskPoll();
-    // Load agent tasks + board tasks immediately, then poll board tasks every 10s
+    // Load agent tasks + board tasks immediately, then keep the live ops panel fresh.
     if (state.currentSession && state.currentSession.type === 'live') {
         loadAgentTasks(state.currentSession.name, state.currentSession.session_id);
     }
     _pollBoardTasksOnce();
-    _boardTaskPollTimer = setInterval(_pollBoardTasksOnce, 10000);
+    _boardTaskPollTimer = setInterval(_pollBoardTasksOnce, BOARD_TASK_POLL_MS);
 }
 
 export function stopBoardTaskPoll() {
@@ -34,7 +39,7 @@ async function _pollBoardTasksOnce() {
     if (!state.currentSession || state.currentSession.type !== 'live') return;
     const boardProject = state.currentSession.board_project || state.currentSession.name;
     if (boardProject) {
-        await loadBoardTasks(boardProject);
+        await loadBoardTasks(boardProject, { quiet: true });
         _fetchLiveCosts(boardProject);
     }
 }
@@ -215,8 +220,10 @@ function initTaskDragReorder() {
 
 /* ── Board Tasks ────────────────────────────────────────── */
 
-export async function loadBoardTasks(boardName) {
+export async function loadBoardTasks(boardName, options = {}) {
+    const quiet = !!options.quiet;
     const normalizedBoardName = boardName || '';
+    if (quiet && _boardTasksInFlight) return;
     const requestSeq = ++_boardTaskRequestSeq;
     _boardTasksBoardName = normalizedBoardName;
     _boardTasksError = '';
@@ -228,8 +235,11 @@ export async function loadBoardTasks(boardName) {
         return;
     }
 
-    _boardTasksLoading = true;
-    renderBoardTaskList();
+    _boardTasksLoading = !quiet;
+    _boardTasksInFlight = true;
+    _lastBoardTaskRefreshAt = Date.now();
+    _lastBoardTaskRefreshBoard = normalizedBoardName;
+    if (!quiet) renderBoardTaskList();
 
     try {
         const resp = await fetch(`/api/board/${encodeURIComponent(boardName)}/tasks`);
@@ -242,11 +252,40 @@ export async function loadBoardTasks(boardName) {
         state.currentBoardTasks = [];
         _boardTasksError = e && e.message ? e.message : 'Failed to load tasks';
     } finally {
+        _boardTasksInFlight = false;
         if (!_isStaleBoardTaskResponse(requestSeq, normalizedBoardName)) {
             _boardTasksLoading = false;
         }
     }
     renderBoardTaskList();
+}
+
+export function refreshCurrentTaskPanelFromLiveSessions() {
+    renderBoardTaskList();
+    _maybeRefreshBoardTasksFromLiveUpdate();
+}
+
+function _maybeRefreshBoardTasksFromLiveUpdate() {
+    if (!_isTasksPanelActive()) return;
+    if (!state.currentSession || state.currentSession.type !== 'live') return;
+    if (_boardTasksLoading) return;
+    const boardProject = _currentBoardProject();
+    if (!boardProject) return;
+
+    const now = Date.now();
+    if (
+        boardProject === _lastBoardTaskRefreshBoard
+        && now - _lastBoardTaskRefreshAt < BOARD_TASK_WS_REFRESH_MS
+    ) {
+        return;
+    }
+
+    loadBoardTasks(boardProject, { quiet: true }).then(() => _fetchLiveCosts(boardProject));
+}
+
+function _isTasksPanelActive() {
+    const panel = document.getElementById('agentic-panel-tasks');
+    return !!(panel && panel.classList.contains('active'));
 }
 
 // Current sort and filter state for task list
@@ -329,8 +368,22 @@ export function renderBoardTaskList() {
     const section = document.getElementById('board-tasks-section');
     if (section) section.style.display = '';
 
-    // Merge board tasks and agent tasks into a unified list
-    const boardTasks = (state.currentBoardTasks || []).map(t => ({ ...t, _source: 'board' }));
+    const boardProject = _currentBoardProject();
+    const liveAgents = _liveAgentsForBoard(boardProject);
+    const liveAgentByName = _liveAgentMap(liveAgents);
+
+    // Merge formal board tasks, local agent checklist rows, and live agent
+    // activity into one operational table. Board tasks remain the source of
+    // truth, while live activity explains why a task may appear stale.
+    const boardTasks = (state.currentBoardTasks || []).map(t => {
+        const liveSession = _agentForAssignee(liveAgentByName, t.assigned_to);
+        return {
+            ...t,
+            _source: 'board',
+            _liveSession: liveSession,
+            _liveState: liveSession ? _agentState(liveSession) : (t.assigned_to ? 'missing' : null),
+        };
+    });
     const agentDisplayName = state.currentSession ? (state.currentSession.display_name || state.currentSession.name) : '';
     const agentTasks = (state.currentAgentTasks || []).map(t => ({
         ...t,
@@ -342,8 +395,10 @@ export function renderBoardTaskList() {
         created_at: t.created_at,
     }));
 
-    const allTasks = [...boardTasks, ...agentTasks];
-    const completedCount = allTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
+    const formalTasks = [...boardTasks, ...agentTasks];
+    const liveActivityRows = _buildLiveActivityRows(liveAgents, formalTasks);
+    const allTasks = [...formalTasks, ...liveActivityRows];
+    const completedCount = formalTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
     const tasks = allTasks.filter(t => {
         if (_hideCompleted && (t.status === 'completed' || t.status === 'skipped')) return false;
         return true;
@@ -381,8 +436,8 @@ export function renderBoardTaskList() {
 
     const countEl = document.getElementById('task-bar-count');
     if (countEl) {
-        const doneCount = allTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
-        countEl.textContent = allTasks.length > 0 ? `${doneCount}/${allTasks.length}` : '';
+        const doneCount = formalTasks.filter(t => t.status === 'completed' || t.status === 'skipped').length;
+        countEl.textContent = formalTasks.length > 0 ? `${doneCount}/${formalTasks.length}` : '';
     }
 
     if (_boardTasksLoading && allTasks.length === 0) {
@@ -445,26 +500,41 @@ export function renderBoardTaskList() {
 
     const rows = tasks.map(t => {
         const isAgent = t._source === 'agent';
-        const statusClass = t.status === 'completed' ? 'completed'
+        const isLive = t._source === 'live';
+        const staleBoardTask = t.status === 'in_progress' && t._liveState
+            && (t._liveState === 'idle' || t._liveState === 'disabled' || t._liveState === 'missing');
+        const statusClass = staleBoardTask ? 'stale'
+            : t.status === 'completed' ? 'completed'
             : t.status === 'in_progress' ? 'in-progress'
+            : t.status === 'working' ? 'in-progress'
+            : t.status === 'waiting' ? 'waiting'
+            : t.status === 'stuck' ? 'blocked'
+            : t.status === 'idle' || t.status === 'disabled' ? 'idle'
             : t.status === 'skipped' ? 'completed'
             : t.status === 'blocked' ? 'blocked'
             : t.status === 'draft' ? 'draft' : '';
         const priorityClass = t.priority ? 'board-task-priority-' + t.priority : 'board-task-priority-none';
         const assignee = t.assigned_to || '\u2014';
+        const assigneeHtml = `${escapeHtml(assignee)}${_agentStateChip(t)}`;
         const title = escapeHtml(t.title || t.description || '');
         const tooltip = t.body ? ` title="${escapeAttr(t.body)}"` : '';
         const timeStr = _formatTaskTime(t.created_at);
-        const statusIcon = t.status === 'completed'
+        const statusIcon = staleBoardTask
+            ? '<span class="material-icons board-task-status-icon stale" title="Board task is in progress, but this agent currently looks idle">pause_circle</span>'
+            : t.status === 'completed'
             ? '<span class="material-icons board-task-status-icon completed">check_circle</span>'
-            : t.status === 'in_progress'
+            : t.status === 'in_progress' || t.status === 'working'
             ? '<span class="task-spinner" title="In progress"></span>'
+            : t.status === 'waiting'
+            ? '<span class="material-icons board-task-status-icon waiting" title="Waiting for input">hourglass_top</span>'
             : t.status === 'skipped'
             ? '<span class="material-icons board-task-status-icon skipped">block</span>'
-            : t.status === 'blocked'
+            : t.status === 'blocked' || t.status === 'stuck'
             ? '<span class="material-icons board-task-status-icon blocked" title="Blocked">lock</span>'
             : t.status === 'draft'
             ? '<span class="material-icons board-task-status-icon draft" title="Draft">edit_note</span>'
+            : t.status === 'disabled'
+            ? '<span class="material-icons board-task-status-icon disabled" title="Sleeping or done">pause_circle</span>'
             : '<span class="material-icons board-task-status-icon pending">radio_button_unchecked</span>';
         let costText = '';
         let costClass = 'board-task-cost';
@@ -479,21 +549,131 @@ export function renderBoardTaskList() {
             costText = '~' + _formatCost(lc.cost_usd, false);
             costClass += ' board-task-cost-live';
             if (lc.cost_usd >= 1.0) costClass += ' board-task-cost-warning';
+        } else if (isLive && t.cost_usd > 0) {
+            costText = _formatCost(t.cost_usd, false);
         }
-        const clickHandler = isAgent ? '' : ` onclick="showTaskDetailModal(${t.id})" style="cursor:pointer"`;
+        const clickHandler = isAgent ? ''
+            : isLive && t.session_id
+            ? ` onclick="selectLiveSession('${escapeAttr(t.session_name || '')}', '${escapeAttr(t.agent_type || '')}', '${escapeAttr(t.session_id || '')}')" style="cursor:pointer"`
+            : ` onclick="showTaskDetailModal(${t.id})" style="cursor:pointer"`;
         return `
-        <div class="board-task-item ${statusClass}"${clickHandler}>
+        <div class="board-task-item ${statusClass}${isLive ? ' board-task-live-row' : ''}"${clickHandler}>
             ${statusIcon}
             <span class="board-task-priority ${priorityClass}">${t.priority ? escapeHtml(t.priority) : '\u2014'}</span>
-            <span class="board-task-type">${isAgent ? 'agent' : 'board'}</span>
-            <span class="board-task-assignee">${escapeHtml(assignee)}</span>
+            <span class="board-task-type">${isLive ? 'live' : isAgent ? 'agent' : 'board'}</span>
+            <span class="board-task-assignee">${assigneeHtml}</span>
             <span class="board-task-desc"${tooltip}>${title}</span>
             <span class="${costClass}">${costText}</span>
-            <span class="board-task-time">${timeStr}</span>
+            <span class="board-task-time">${isLive ? escapeHtml(t.last_activity || '') : timeStr}</span>
         </div>`;
     }).join('');
 
     container.innerHTML = header + rows;
+}
+
+function _liveAgentsForBoard(boardProject) {
+    if (!boardProject) return [];
+    return (state.liveSessions || [])
+        .filter(s => (s.board_project || s.board_name || '') === boardProject)
+        .filter(s => s.agent_type !== 'terminal');
+}
+
+function _liveAgentMap(liveAgents) {
+    const map = new Map();
+    liveAgents.forEach(s => {
+        _agentKeys(s).forEach(key => {
+            if (key && !map.has(key)) map.set(key, s);
+        });
+    });
+    return map;
+}
+
+function _agentForAssignee(map, assignee) {
+    const key = _normalizeAgentKey(assignee);
+    return key ? map.get(key) || null : null;
+}
+
+function _agentKeys(s) {
+    return [
+        s.display_name,
+        s.board_job_title,
+        s.subscriber_id,
+        s.name,
+    ].map(_normalizeAgentKey).filter(Boolean);
+}
+
+function _normalizeAgentKey(value) {
+    return (value || '').toString().trim().toLowerCase();
+}
+
+function _agentState(s) {
+    if (!s) return 'idle';
+    if (s.done || s.sleeping) return 'disabled';
+    if (s.stuck) return 'stuck';
+    if (s.waiting_for_input) return 'waiting';
+    const provider = (s.agent_type || '').toLowerCase();
+    const recentlyActiveCodex = provider === 'codex'
+        && Number.isFinite(Number(s.staleness_seconds))
+        && Number(s.staleness_seconds) < 30
+        && !/task complete/i.test(s.status || '');
+    if (s.working || recentlyActiveCodex) return 'working';
+    return 'idle';
+}
+
+function _buildLiveActivityRows(liveAgents, formalTasks) {
+    const hasFormalFor = new Set(
+        formalTasks
+            .filter(t => t.assigned_to)
+            .map(t => _normalizeAgentKey(t.assigned_to))
+    );
+
+    return liveAgents.map(s => {
+        const label = s.display_name || s.board_job_title || s.name || 'Agent';
+        const stateName = _agentState(s);
+        const hasFormal = hasFormalFor.has(_normalizeAgentKey(label));
+        return {
+            id: `live-${s.session_id || s.name || label}`,
+            _source: 'live',
+            status: stateName,
+            priority: null,
+            assigned_to: label,
+            title: _liveActivityTitle(s, stateName, hasFormal),
+            body: s.summary || s.status || '',
+            created_at: '',
+            cost_usd: Number(s.token_cost_usd || 0),
+            session_id: s.session_id || '',
+            session_name: s.name || '',
+            agent_type: s.agent_type || '',
+            last_activity: _formatLiveAge(s.staleness_seconds),
+            _liveState: stateName,
+        };
+    });
+}
+
+function _liveActivityTitle(s, stateName, hasFormal) {
+    const summary = (s.summary || s.status || '').trim();
+    if (summary) return summary;
+    if (stateName === 'working') return hasFormal ? 'Working on assigned board task' : 'Working through the current turn';
+    if (stateName === 'waiting') return s.waiting_summary || 'Waiting for operator input';
+    if (stateName === 'stuck') return 'Needs attention before work can continue';
+    if (stateName === 'disabled') return s.sleeping ? 'Sleeping' : 'Session complete';
+    return hasFormal ? 'Idle with task context visible' : 'Idle, no active task claimed';
+}
+
+function _formatLiveAge(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return '';
+    if (n < 5) return 'now';
+    if (n < 60) return `${Math.round(n)}s ago`;
+    if (n < 3600) return `${Math.round(n / 60)}m ago`;
+    return `${Math.round(n / 3600)}h ago`;
+}
+
+function _agentStateChip(task) {
+    const stateName = task._liveState;
+    if (!stateName) return '';
+    const label = stateName === 'disabled' ? 'off' : stateName === 'missing' ? 'no live' : stateName;
+    return `<span class="board-task-agent-state board-task-agent-state-${escapeAttr(stateName)}">${escapeHtml(label)}</span>`;
 }
 
 function _renderTaskState({ icon, title, body, tone = '', action = '' }) {

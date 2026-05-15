@@ -29,6 +29,7 @@ type TokenUsageRecord struct {
 	OutputTokens     int
 	CacheReadTokens  int
 	CacheWriteTokens int
+	ContextTokens    int
 	CostUSD          float64
 	RecordedAt       string
 	Source           string // "proxy"
@@ -110,6 +111,7 @@ func (p *Proxy) recordTokenUsage(ctx context.Context, sessionID string, provider
 		OutputTokens:     usage.OutputTokens,
 		CacheReadTokens:  usage.CacheReadTokens,
 		CacheWriteTokens: usage.CacheWriteTokens,
+		ContextTokens:    usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens,
 		CostUSD:          breakdown.TotalCostUSD,
 		RecordedAt:       time.Now().UTC().Format(time.RFC3339),
 		Source:           "proxy",
@@ -838,8 +840,8 @@ func extractOpenAIUsage(body []byte) TokenUsage {
 func extractOpenAIResponsesUsage(body []byte) TokenUsage {
 	var resp struct {
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
 			InputTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"input_tokens_details"`
@@ -865,8 +867,8 @@ func parseOpenAIResponsesSSEChunk(data string, current TokenUsage) TokenUsage {
 		Type     string `json:"type"`
 		Response struct {
 			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+				InputTokens        int `json:"input_tokens"`
+				OutputTokens       int `json:"output_tokens"`
 				InputTokensDetails struct {
 					CachedTokens int `json:"cached_tokens"`
 				} `json:"input_tokens_details"`

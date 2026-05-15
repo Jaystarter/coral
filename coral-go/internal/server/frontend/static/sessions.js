@@ -16,7 +16,7 @@ import { loadAgentEvents, switchAgenticTab } from './agentic_state.js';
 import { loadHistoryEvents, loadHistoryTasks, loadHistoryAgentNotes } from './history_tabs.js';
 import { startLiveHistoryPoll, stopLiveHistoryPoll, resetLiveHistory } from './live_chat.js';
 import { syncPaneWidth, resetSyncedCols } from './capture.js';
-import { disposeTerminal, createTerminal, connectTerminalWs, disconnectTerminalWs, fitTerminal } from './xterm_renderer.js';
+import { disposeTerminal, createTerminal, connectTerminalWs, disconnectTerminalWs, fitTerminal, showSleepingTerminalState } from './xterm_renderer.js';
 import { getRendererMode } from './renderers.js';
 import { invalidateFileCache, fetchFileList } from './file_mention.js';
 
@@ -97,6 +97,7 @@ export async function selectLiveSession(name, agentType, sessionId) {
 
     // Use cached data from WS for immediate display (no blocking fetch)
     const agent = state.liveSessions.find(s => s.session_id === sessionId);
+    const isSleeping = !!agent?.sleeping;
     if (agent) {
         updateSessionStatus(agent.status);
         updateSessionSummary(agent.summary);
@@ -127,7 +128,7 @@ export async function selectLiveSession(name, agentType, sessionId) {
     // Show sleeping overlay if agent is sleeping
     const sleepOverlay = document.getElementById('session-sleeping-overlay');
     if (sleepOverlay) {
-        sleepOverlay.style.display = (agent && agent.sleeping) ? '' : 'none';
+        sleepOverlay.style.display = isSleeping ? '' : 'none';
     }
 
     // Set up quick action buttons
@@ -177,9 +178,14 @@ export async function selectLiveSession(name, agentType, sessionId) {
         // Don't clear innerHTML — createTerminal reuses the existing xterm
         // instance to avoid canvas recreation issues in WebKit webview
         createTerminal(container);
-        const tmuxName = agentData ? (agentData.tmux_session || name) : name;
-        dbg('terminal WS using tmux_session:', tmuxName, '(agent name:', name, ')');
-        connectTerminalWs(tmuxName, agentType, sessionId);
+        if (isSleeping) {
+            dbg('session is sleeping, skipping terminal websocket replay');
+            showSleepingTerminalState();
+        } else {
+            const tmuxName = agentData ? (agentData.tmux_session || name) : name;
+            dbg('terminal WS using tmux_session:', tmuxName, '(agent name:', name, ')');
+            connectTerminalWs(tmuxName, agentType, sessionId);
+        }
         // Fit terminal after session switch — the container may already be
         // visible at the right size so ResizeObserver won't fire.
         // Double-fit: first at 50ms for quick response, second at 250ms
@@ -195,7 +201,7 @@ export async function selectLiveSession(name, agentType, sessionId) {
     }
 
     // Sync tmux pane width to match browser display after layout settles
-    setTimeout(syncPaneWidth, 100);
+    if (!isSleeping) setTimeout(syncPaneWidth, 100);
 
     // Start history poll if the history tab is currently active
     const historyTab = document.getElementById("agentic-tab-history");

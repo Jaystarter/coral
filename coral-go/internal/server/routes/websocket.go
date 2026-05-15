@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -364,10 +365,14 @@ func (h *SessionsHandler) buildSessionListForWS(r *http.Request) ([]map[string]a
 		if cw, ok := ctxWindowMap[sid]; ok && cw > 0 {
 			entry["context_window"] = cw
 			if turnCtx, ok := latestTurnCtx[sid]; ok && turnCtx > 0 {
-				pct := int(float64(turnCtx) / float64(cw) * 100)
+				pct := int(math.Round(float64(turnCtx) / float64(cw) * 100))
+				if pct < 1 {
+					pct = 1
+				}
 				if pct > 100 {
 					pct = 100
 				}
+				entry["context_tokens"] = turnCtx
 				entry["context_pct"] = pct
 			}
 		}

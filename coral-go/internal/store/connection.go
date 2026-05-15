@@ -110,6 +110,7 @@ var columnMigrations = []struct {
 	{"session_index", "display_name", "TEXT"},
 	{"token_usage", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"token_usage", "cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"token_usage", "context_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"token_usage", "session_start_at", "TEXT"},
 	{"token_usage", "last_activity_at", "TEXT"},
 	{"token_usage", "source", "TEXT NOT NULL DEFAULT 'jsonl'"},
@@ -243,6 +244,20 @@ CREATE TABLE IF NOT EXISTS user_settings (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS remote_board_subscriptions (
+	id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+	session_id           TEXT NOT NULL,
+	remote_server        TEXT NOT NULL,
+	project              TEXT NOT NULL,
+	job_title            TEXT NOT NULL,
+	last_notified_unread INTEGER NOT NULL DEFAULT 0,
+	created_at           TEXT NOT NULL,
+	UNIQUE(session_id, remote_server, project)
+);
+
+CREATE INDEX IF NOT EXISTS idx_remote_board_subscriptions_session
+	ON remote_board_subscriptions(session_id);
 
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
 	id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -444,9 +459,12 @@ CREATE TABLE IF NOT EXISTS token_usage (
     agent_type      TEXT NOT NULL DEFAULT 'claude',
     team_id         INTEGER,
     board_name      TEXT,
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    total_tokens    INTEGER NOT NULL DEFAULT 0,
+	    input_tokens    INTEGER NOT NULL DEFAULT 0,
+	    output_tokens   INTEGER NOT NULL DEFAULT 0,
+	    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+	    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+	    context_tokens  INTEGER NOT NULL DEFAULT 0,
+	    total_tokens    INTEGER NOT NULL DEFAULT 0,
     cost_usd        REAL NOT NULL DEFAULT 0,
     num_turns       INTEGER NOT NULL DEFAULT 0,
     recorded_at     TEXT NOT NULL

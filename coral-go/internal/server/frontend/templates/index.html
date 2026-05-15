@@ -47,7 +47,8 @@
     <link rel="stylesheet" href="/static/css/native-windows.css">
     <!-- Atelier is the final product skin. Keep it after responsive/native layers so it wins the cascade. -->
     <link rel="stylesheet" href="/static/css/atelier.css?v=20260504-atelier">
-    <link rel="stylesheet" href="/static/css/mission_canvas.css?v=20260505-canvas">
+    <link rel="stylesheet" href="/static/vendor/mission-canvas/react-flow-canvas.css?v=20260511-rf9">
+    <link rel="stylesheet" href="/static/css/mission_canvas.css?v=20260511-rf9">
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons&display=swap">
     <!-- CodeMirror 6 — single IIFE bundle, sets window.CoralCM -->
     <script src="/static/vendor/codemirror/codemirror-bundle.js"></script>
@@ -252,33 +253,35 @@
             {{ template "includes/views/live_session.html" . }}
 
             <div id="agent-canvas-view" class="agent-canvas-view" style="display:none">
-                <header class="agent-canvas-header">
-                    <div class="agent-canvas-titleblock">
-                        <span class="agent-canvas-kicker">Flow atlas</span>
-                        <h2>Trace every branch.</h2>
-                        <p>Map board messages, mentions, tasks, and handoffs as a navigable operations graph.</p>
+                <div class="canvas-hud" aria-label="Canvas controls">
+                    <div class="canvas-hud-left" aria-label="Canvas status">
+                        <div class="canvas-hud-title">
+                            <span class="canvas-hud-kicker">Live ops</span>
+                            <strong>Agent Canvas</strong>
+                            <small id="canvas-hud-scope">All teams</small>
+                        </div>
+                        <div class="canvas-hud-stats" aria-label="Live canvas summary">
+                            <span class="canvas-hud-stat"><span>Visible</span><strong id="canvas-hud-agents">0 visible</strong></span>
+                            <span class="canvas-hud-stat"><span>Working</span><strong id="canvas-hud-working">0 working</strong></span>
+                            <span class="canvas-hud-stat"><span>Attention</span><strong id="canvas-hud-attention">clear</strong></span>
+                            <span class="canvas-hud-stat"><span>Context</span><strong id="canvas-hud-context">ctx n/a</strong></span>
+                        </div>
                     </div>
-                    <div class="agent-canvas-controls" aria-label="Canvas controls">
+                    <div class="canvas-hud-controls">
                         <label class="agent-canvas-select-wrap">
                             <span>Scope</span>
                             <select id="agent-canvas-team-filter" class="agent-canvas-select" aria-label="Filter canvas by team">
                                 <option value="all">All Teams</option>
                             </select>
                         </label>
-                        <button type="button" id="agent-canvas-fit" class="agent-canvas-control-btn">
-                            <span class="material-icons">center_focus_strong</span>
-                            Fit
-                        </button>
-                        <button type="button" id="agent-canvas-flow-toggle" class="agent-canvas-control-btn is-active" aria-pressed="true">
-                            <span class="material-icons">timeline</span>
-                            Show Flow
-                        </button>
-                        <button type="button" id="agent-canvas-motion-toggle" class="agent-canvas-control-btn" aria-pressed="false">
-                            <span class="material-icons">motion_photos_off</span>
-                            Reduce Motion
-                        </button>
                     </div>
-                </header>
+                </div>
+                <div class="canvas-hud-legend" aria-label="Agent state legend">
+                    <span class="legend-working"><i></i> Working</span>
+                    <span class="legend-waiting"><i></i> Waiting</span>
+                    <span class="legend-stuck"><i></i> Stuck</span>
+                    <span class="legend-sleeping"><i></i> Sleeping</span>
+                </div>
                 <section id="agent-canvas-stage" class="agent-canvas-stage" aria-live="polite"></section>
             </div>
 
@@ -338,7 +341,7 @@
 
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/app.js?v=20260511-table1"></script>
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker

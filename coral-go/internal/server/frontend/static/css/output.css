@@ -470,6 +470,21 @@
     flex-shrink: 0;
 }
 
+.image-attachment-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    background: color-mix(in oklch, var(--accent) 18%, var(--bg-primary));
+    border: 1px solid color-mix(in oklch, var(--accent) 42%, transparent);
+    color: var(--accent);
+    font: 800 9px/1 var(--font-mono, ui-monospace, monospace);
+    letter-spacing: 0.08em;
+    flex-shrink: 0;
+}
+
 .image-attachment-name {
     font-size: 11px;
     color: var(--text-secondary);

@@ -52,3 +52,9 @@ coral-go/internal/server/frontend/static/agent_docs/*
 icons/history.mp4
 icons/main_loop.mp4
 *.pem
+
+# Frontend island dependencies
+node_modules/
+
+# Runtime board handoff state
+coral-go/internal/server/routes/board_state_terminal-*.json

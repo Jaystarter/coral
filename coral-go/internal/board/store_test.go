@@ -224,10 +224,20 @@ func TestGetSubscription_MultipleBoards(t *testing.T) {
 	assert.Equal(t, "board-B", resultB.Project)
 	assert.Equal(t, "Orchestrator", resultB.SubscriberID)
 
+	projectResult, err := s.GetSubscriptionForProject(ctx, "board-A", "Orchestrator")
+	require.NoError(t, err)
+	require.NotNil(t, projectResult)
+	assert.Equal(t, "board-A", projectResult.Project)
+	assert.Equal(t, "tmux-session-A", projectResult.SessionName)
+
 	// GetSubscriptionBySessionName for nonexistent session returns nil
 	resultNone, err := s.GetSubscriptionBySessionName(ctx, "tmux-nonexistent")
 	require.NoError(t, err)
 	assert.Nil(t, resultNone)
+
+	projectNone, err := s.GetSubscriptionForProject(ctx, "board-missing", "Orchestrator")
+	require.NoError(t, err)
+	assert.Nil(t, projectNone)
 }
 
 // ── Task Tests ──────────────────────────────────────────────────────

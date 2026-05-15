@@ -105,36 +105,44 @@ function formatStaleness(seconds) {
     return `${Math.floor(seconds / 3600)}h ago`;
 }
 
-function getStateLabel(s) {
-    if (s.sleeping) return "Sleeping";
-    if (s.waiting_for_input) return "Needs input";
-    if (s.stuck) return "Stuck";
-    if (isVisiblyWorking(s)) return "Working";
-    if (s.done) return "Done";
-    return "Idle";
+function isVisiblyWorking(s) {
+    if (s.sleeping || s.done || s.waiting_for_input || s.stuck) return false;
+    return !!s.working;
 }
 
-function isVisiblyWorking(s) {
-    if (s.working) return true;
-    if (s.sleeping || s.done || s.waiting_for_input || s.stuck) return false;
-    if ((s.agent_type || "").toLowerCase() !== "codex") return false;
-    const staleness = Number(s.staleness_seconds);
-    return Number.isFinite(staleness) && staleness < 30;
+function getVisualStateKey(s) {
+    if (state.killedSessions?.[s.session_id] || s.done) return "done";
+    if (s.sleeping) return "sleeping";
+    if (s.waiting_for_input) return "waiting";
+    if (s.stuck) return "stuck";
+    if (isVisiblyWorking(s)) return "working";
+    return "idle";
+}
+
+function getStateLabel(s) {
+    switch (getVisualStateKey(s)) {
+        case "done": return "Complete";
+        case "sleeping": return "Sleeping";
+        case "waiting": return "Needs input";
+        case "stuck": return "Stuck";
+        case "working": return "Working";
+        default: return "Idle";
+    }
 }
 
 function getDotStateLabel(s) {
-    if (s.sleeping || s.done) return "Disabled";
-    if (s.waiting_for_input) return "Needs input";
-    if (s.stuck) return "Error";
-    if (isVisiblyWorking(s)) return "Working";
-    return "Idle";
+    return getStateLabel(s);
 }
 
 function getMobileStatusChip(s) {
-    if (s.waiting_for_input) return { label: "Needs Input", className: "needs-input" };
-    if (s.stuck) return { label: "Error", className: "error" };
-    if (s.working) return { label: "Running", className: "running" };
-    return { label: "Idle", className: "idle" };
+    switch (getVisualStateKey(s)) {
+        case "done": return { label: "Complete", className: "complete" };
+        case "sleeping": return { label: "Sleeping", className: "sleeping" };
+        case "waiting": return { label: "Needs Input", className: "needs-input" };
+        case "stuck": return { label: "Error", className: "error" };
+        case "working": return { label: "Working", className: "running" };
+        default: return { label: "Idle", className: "idle" };
+    }
 }
 
 function buildSessionTooltip(s) {
@@ -174,11 +182,45 @@ function buildSessionTooltip(s) {
 }
 
 function getDotClass(s) {
-    if (s.sleeping || s.done) return "disabled";
-    if (s.waiting_for_input) return "waiting";
-    if (s.stuck) return "stuck";
-    if (isVisiblyWorking(s)) return "working";
-    return "idle";
+    return getVisualStateKey(s);
+}
+
+const _sessionVisualStateMemory = new Map();
+const _sessionVisualStateFlash = new Map();
+
+function _stateTransitionClass(s, stateKey) {
+    const key = s.session_id || `${s.name || ""}:${s.agent_type || ""}`;
+    if (!key) return "";
+
+    const now = Date.now();
+    const previous = _sessionVisualStateMemory.get(key);
+    if (previous && previous !== stateKey) {
+        const text = `${s.status || ""} ${s.summary || ""} ${s.waiting_summary || ""}`;
+        const looksComplete = /(?:complete|completed|done|finished|resolved|approved|shipped|ready)/i.test(text);
+        let className = " state-changed";
+        if (stateKey === "working") className = " state-started";
+        if (stateKey === "waiting" || stateKey === "stuck") className = " state-attention-flash";
+        if (stateKey === "done" || looksComplete) className = " state-completed";
+        _sessionVisualStateFlash.set(key, { className, until: now + 5200 });
+    }
+    _sessionVisualStateMemory.set(key, stateKey);
+
+    const flash = _sessionVisualStateFlash.get(key);
+    if (!flash || flash.until < now) {
+        _sessionVisualStateFlash.delete(key);
+        return "";
+    }
+    return flash.className;
+}
+
+function _sessionInlineStatus(s, stateKey, lastActivity) {
+    const explicit = String(s.waiting_summary || s.status || s.summary || "").trim();
+    if (stateKey === "working") return explicit || `Working now · ${lastActivity}`;
+    if (stateKey === "waiting") return explicit || `Needs input · ${lastActivity}`;
+    if (stateKey === "stuck") return explicit || `Needs attention · ${lastActivity}`;
+    if (stateKey === "done") return explicit || `Complete · ${lastActivity}`;
+    if (stateKey === "sleeping") return explicit || "Sleeping";
+    return explicit ? `Idle · ${explicit}` : `Idle · ${lastActivity}`;
 }
 
 function _emitLiveSessionsRendered(sessions) {
@@ -598,24 +640,30 @@ window._sendBoardChat = _sendBoardChat;
 
 async function _toggleBoardChatPause(boardName) {
     const btn = document.getElementById('board-chat-pause-btn');
-    const banner = document.getElementById('board-chat-paused-banner');
-    const wasPaused = btn?.classList.contains('mb-action-danger');
-    const endpoint = wasPaused ? 'resume' : 'pause';
+    if (btn) btn.disabled = true;
     try {
-        await fetch(`/api/board/${encodeURIComponent(boardName)}/${endpoint}`, { method: 'POST' });
-        if (btn) {
-            if (wasPaused) {
-                btn.textContent = 'Pause Board';
-                btn.classList.remove('mb-action-danger');
+        const sleepState = await _fetchBoardSleepState(boardName);
+        if (sleepState.sleeping) {
+            const resp = await fetch(`/api/sessions/live/team/${encodeURIComponent(boardName)}/wake`, { method: 'POST' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.error) {
+                showToast(data.error || `Failed to wake "${boardName}"`, true);
+            } else if ((data.sessions_relaunched || 0) === 0) {
+                showToast(`No agents woke for "${boardName}". Check the Coral log for launch errors.`, true);
             } else {
-                btn.textContent = 'Resume Board';
-                btn.classList.add('mb-action-danger');
+                showToast(`Woke "${boardName}" (${data.sessions_relaunched} agents)`);
             }
-        }
-        if (banner) {
-            banner.style.display = wasPaused ? 'none' : '';
+            if (typeof window._coralLoadLiveSessions === 'function') {
+                window._coralLoadLiveSessions();
+            }
+        } else {
+            const wasPaused = btn?.classList.contains('mb-action-danger');
+            const endpoint = wasPaused ? 'resume' : 'pause';
+            await fetch(`/api/board/${encodeURIComponent(boardName)}/${endpoint}`, { method: 'POST' });
         }
     } catch { /* ignore */ }
+    await _checkBoardPauseState(boardName);
+    if (btn) btn.disabled = false;
 }
 window._toggleBoardChatPause = _toggleBoardChatPause;
 
@@ -633,23 +681,51 @@ window._toggleBoardPause = _toggleBoardPause;
 
 async function _checkBoardPauseState(boardName) {
     try {
-        const resp = await fetch(`/api/board/${encodeURIComponent(boardName)}/paused`);
-        const data = await resp.json();
+        const [pauseResp, sleepState] = await Promise.all([
+            fetch(`/api/board/${encodeURIComponent(boardName)}/paused`),
+            _fetchBoardSleepState(boardName),
+        ]);
+        const data = await pauseResp.json();
         const btn = document.getElementById('board-chat-pause-btn');
         const banner = document.getElementById('board-chat-paused-banner');
+        if (_activeBoardChat && _activeBoardChat !== boardName) return;
         if (btn) {
-            if (data.paused) {
+            btn.classList.toggle('team-sleeping', !!sleepState.sleeping);
+            if (sleepState.sleeping) {
+                btn.textContent = 'Wake Team';
+                btn.title = 'Wake Team — relaunches sleeping agents and resumes board reads';
+                btn.classList.add('mb-action-danger');
+            } else if (data.paused) {
                 btn.textContent = 'Resume Board';
+                btn.title = 'Resume Board — lets awake agents receive new board messages';
                 btn.classList.add('mb-action-danger');
             } else {
                 btn.textContent = 'Pause Board';
+                btn.title = 'Pause Board — stops agents from receiving new messages until resumed';
                 btn.classList.remove('mb-action-danger');
             }
         }
         if (banner) {
-            banner.style.display = data.paused ? '' : 'none';
+            banner.classList.toggle('board-sleeping-banner', !!sleepState.sleeping);
+            if (sleepState.sleeping) {
+                banner.textContent = 'Team is sleeping — wake it to relaunch agents and resume board reads';
+                banner.style.display = '';
+            } else {
+                banner.textContent = 'Board reads are paused — agents cannot see new messages';
+                banner.style.display = data.paused ? '' : 'none';
+            }
         }
     } catch { /* ignore */ }
+}
+
+async function _fetchBoardSleepState(boardName) {
+    try {
+        const resp = await fetch(`/api/sessions/live/team/${encodeURIComponent(boardName)}/sleep-status`);
+        if (!resp.ok) return { sleeping: false };
+        return await resp.json();
+    } catch {
+        return { sleeping: false };
+    }
 }
 
 async function _clearBoardMessages(boardName) {
@@ -1280,10 +1356,13 @@ function _renderSessionItem(s, groupName, isCompact, collapsed, teamDefaultDir) 
     const goalText = (isActive && s.summary) ? escapeHtml(s.summary) : null;
     const goal = goalText || "";
     const goalBtn = (!goalText && !isTerminal) ? `<button class="sidebar-goal-btn" onclick="event.stopPropagation(); requestGoal('${escapeAttr(s.name)}', '${escapeAttr(s.agent_type)}', '${sid}')" title="Generate Goal"><span class="material-icons" style="font-size:16px">auto_awesome</span></button>` : "";
-    const isDone = !!state.killedSessions?.[s.session_id];
+    const isDone = !!state.killedSessions?.[s.session_id] || !!s.done;
     const displayLabel = s.display_name || (isCompact && s.board_job_title) || (isTerminal ? "Terminal" : "Agent");
     const mobileStatus = getMobileStatusChip(s);
     const lastActivity = formatStaleness(s.staleness_seconds);
+    const stateKey = dotClass;
+    const stateFlashClass = _stateTransitionClass(s, stateKey);
+    const inlineStatus = _sessionInlineStatus(s, stateKey, lastActivity);
     const needsAttention = !!(s.waiting_for_input || s.stuck);
     const unreadBoardBadge = s.board_unread > 0
         ? `<span class="session-mobile-meta-pill">${s.board_unread} unread</span>`
@@ -1388,7 +1467,7 @@ function _renderSessionItem(s, groupName, isCompact, collapsed, teamDefaultDir) 
     const clickHandler = isDone
         ? `selectHistorySession('${sid}')`
         : `selectLiveSession('${escapeAttr(s.name)}', '${escapeAttr(s.agent_type)}', '${sid}')`;
-    return `<li class="session-group-item${isActive ? ' active' : ''}${compactClass}${collapsedClass}${sleepingClass}${attentionClass}${doneClass}"
+    return `<li class="session-group-item state-${escapeAttr(stateKey)}${stateFlashClass}${isActive ? ' active' : ''}${compactClass}${collapsedClass}${sleepingClass}${attentionClass}${doneClass}"
         draggable="true"
         data-session-id="${sid}"
         data-group="${escapeAttr(groupName)}"
@@ -1409,12 +1488,12 @@ function _renderSessionItem(s, groupName, isCompact, collapsed, teamDefaultDir) 
             </div>
             <div class="session-mobile-meta">
                 <span class="session-status-chip ${escapeAttr(mobileStatus.className)}">${escapeHtml(mobileStatus.label)}</span>
-                <span class="session-activity-text" title="${escapeAttr(activityLabel)} ${escapeAttr(lastActivity)}">${escapeHtml(mobileStatus.label)}</span>
+                <span class="session-activity-text" title="${escapeAttr(activityLabel)} ${escapeAttr(lastActivity)}">${escapeHtml(lastActivity)}</span>
                 ${unreadBoardBadge}
             </div>
             <span class="session-goal${isCompact ? ' session-goal-compact' : ''}">${goal}</span>
             ${branchTag}
-            ${isActive && s.status ? `<span class="session-inline-status">${escapeHtml(s.status)}</span>` : ''}
+            ${inlineStatus ? `<span class="session-inline-status session-inline-status-${escapeAttr(stateKey)}" title="${escapeAttr(inlineStatus)}">${escapeHtml(inlineStatus)}</span>` : ''}
         </div>
         <div class="session-tooltip">${tooltip}</div>
     </li>`;
@@ -2237,14 +2316,21 @@ export function updateSessionStatus(status) {
 }
 
 function _renderTokenLine(s) {
-    const pct = s.context_pct || 0;
-    if (pct === 0) return '';
+    const pctValue = Number(s.context_pct || 0);
+    if (!Number.isFinite(pctValue) || pctValue <= 0) return '';
+    const pct = Math.max(1, Math.min(100, Math.round(pctValue)));
     const ctxWindow = s.context_window || 0;
+    const contextTokens = Number(s.context_tokens || 0);
+    const usedTokens = contextTokens > 0 ? contextTokens : (ctxWindow > 0 ? Math.round(ctxWindow * pctValue / 100) : 0);
     const barColor = pct >= 80 ? 'var(--status-error, #f85149)' : pct >= 50 ? 'var(--status-warning, #d29922)' : 'var(--text-muted, #8b949e)';
-    const titleText = ctxWindow > 0 ? `${_formatTokens(Math.round(ctxWindow * pct / 100))} / ${_formatTokens(ctxWindow)} tokens (${pct}%)` : `Context: ${pct}%`;
+    const titleText = ctxWindow > 0 && usedTokens > 0
+        ? `${_formatTokens(usedTokens)} / ${_formatTokens(ctxWindow)} current context (${pct}%)`
+        : `Context: ${pct}%`;
+    const tokenHint = usedTokens > 0 ? `<span class="context-token-label">${_formatTokens(usedTokens)}</span>` : '';
     return `<span class="session-context-bar" title="${titleText}">
         <span class="context-bar-track"><span class="context-bar-fill" style="width:${pct}%;background:${barColor}"></span></span>
         <span class="context-bar-label">${pct}%</span>
+        ${tokenHint}
     </span>`;
 }
 

@@ -981,6 +981,16 @@
     opacity: 0.55;
 }
 
+.board-task-item.idle {
+    opacity: 0.72;
+}
+
+.board-task-item.stale {
+    background:
+        linear-gradient(90deg, color-mix(in oklch, var(--warning) 9%, transparent), transparent 64%),
+        color-mix(in oklch, var(--bg-tertiary) 22%, transparent);
+}
+
 .board-task-item.blocked {
     opacity: 0.7;
 }
@@ -991,6 +1001,18 @@
 
 .board-task-item.in-progress .board-task-desc {
     color: var(--accent, #58a6ff);
+}
+
+.board-task-item.stale .board-task-desc {
+    color: color-mix(in oklch, var(--warning) 72%, var(--text-primary));
+}
+
+.board-task-live-row {
+    background: color-mix(in oklch, var(--bg-primary) 22%, transparent);
+}
+
+.board-task-live-row .board-task-desc {
+    color: var(--text-secondary);
 }
 
 .board-task-status-icon {
@@ -1005,6 +1027,9 @@
 .board-task-status-icon.skipped { color: var(--text-muted); opacity: 0.6; }
 .board-task-status-icon.blocked { color: var(--warning, #d29922); }
 .board-task-status-icon.draft { color: var(--text-muted); opacity: 0.7; }
+.board-task-status-icon.waiting { color: var(--warning, #d29922); }
+.board-task-status-icon.stale { color: var(--warning, #d29922); }
+.board-task-status-icon.disabled { color: var(--text-muted); opacity: 0.65; }
 
 .board-task-priority {
     font-size: 10px;
@@ -1042,6 +1067,36 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.board-task-agent-state {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 5px;
+    border: 1px solid color-mix(in oklch, var(--text-muted) 18%, transparent);
+    border-radius: 999px;
+    padding: 1px 5px;
+    color: var(--text-muted);
+    background: color-mix(in oklch, var(--bg-primary) 50%, transparent);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    vertical-align: 1px;
+}
+
+.board-task-agent-state-working {
+    border-color: color-mix(in oklch, var(--success) 26%, transparent);
+    color: color-mix(in oklch, var(--success) 78%, var(--text-primary));
+    background: color-mix(in oklch, var(--success) 9%, transparent);
+}
+
+.board-task-agent-state-waiting,
+.board-task-agent-state-stuck,
+.board-task-agent-state-missing {
+    border-color: color-mix(in oklch, var(--warning) 30%, transparent);
+    color: color-mix(in oklch, var(--warning) 82%, var(--text-primary));
+    background: color-mix(in oklch, var(--warning) 10%, transparent);
 }
 
 .board-task-desc {

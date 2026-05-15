@@ -19,6 +19,7 @@ type TokenUsage struct {
 	OutputTokens     int     `db:"output_tokens" json:"output_tokens"`
 	CacheReadTokens  int     `db:"cache_read_tokens" json:"cache_read_tokens"`
 	CacheWriteTokens int     `db:"cache_write_tokens" json:"cache_write_tokens"`
+	ContextTokens    int     `db:"context_tokens" json:"context_tokens"`
 	TotalTokens      int     `db:"total_tokens" json:"total_tokens"`
 	CostUSD          float64 `db:"cost_usd" json:"cost_usd"`
 	NumTurns         int     `db:"num_turns" json:"num_turns"`
@@ -105,18 +106,19 @@ func (s *TokenUsageStore) RecordUsage(ctx context.Context, u *TokenUsage) error 
 
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO token_usage
-		 (session_id, agent_name, agent_type, team_id, board_name, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, num_turns, session_start_at, last_activity_at, recorded_at, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(session_id, recorded_at) DO UPDATE SET
-		   agent_name = excluded.agent_name,
-		   agent_type = excluded.agent_type,
+			 (session_id, agent_name, agent_type, team_id, board_name, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, context_tokens, total_tokens, cost_usd, num_turns, session_start_at, last_activity_at, recorded_at, source)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(session_id, recorded_at) DO UPDATE SET
+			   agent_name = excluded.agent_name,
+			   agent_type = excluded.agent_type,
 		   team_id = excluded.team_id,
 		   board_name = excluded.board_name,
 		   input_tokens = excluded.input_tokens,
-		   output_tokens = excluded.output_tokens,
-		   cache_read_tokens = excluded.cache_read_tokens,
-		   cache_write_tokens = excluded.cache_write_tokens,
-		   total_tokens = excluded.total_tokens,
+			   output_tokens = excluded.output_tokens,
+			   cache_read_tokens = excluded.cache_read_tokens,
+			   cache_write_tokens = excluded.cache_write_tokens,
+			   context_tokens = excluded.context_tokens,
+			   total_tokens = excluded.total_tokens,
 		   cost_usd = excluded.cost_usd,
 		   num_turns = excluded.num_turns,
 		   session_start_at = excluded.session_start_at,
@@ -124,7 +126,7 @@ func (s *TokenUsageStore) RecordUsage(ctx context.Context, u *TokenUsage) error 
 		   source = excluded.source
 		 WHERE COALESCE(token_usage.source, 'jsonl') = 'jsonl' AND excluded.source = 'jsonl'`,
 		u.SessionID, u.AgentName, u.AgentType, u.TeamID, u.BoardName,
-		u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.TotalTokens, u.CostUSD, u.NumTurns, u.SessionStartAt, u.LastActivityAt, u.RecordedAt, u.Source)
+		u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.ContextTokens, u.TotalTokens, u.CostUSD, u.NumTurns, u.SessionStartAt, u.LastActivityAt, u.RecordedAt, u.Source)
 	if err != nil {
 		return err
 	}
@@ -325,7 +327,7 @@ func (s *TokenUsageStore) GetLatestTurnContextBySessionIDs(ctx context.Context, 
 	// Use qualified sourceDedup for the outer WHERE to avoid ambiguous column name
 	qualifiedDedup := `(COALESCE(t.source,'jsonl') = 'jsonl' OR t.session_id NOT IN (SELECT DISTINCT session_id FROM token_usage WHERE source = 'jsonl'))`
 	query, args, err := sqlx.In(
-		`SELECT t.session_id, (t.input_tokens + t.cache_read_tokens + t.cache_write_tokens) as context_tokens
+		`SELECT t.session_id, COALESCE(NULLIF(t.context_tokens, 0), t.input_tokens + t.cache_read_tokens + t.cache_write_tokens) as context_tokens
 		 FROM token_usage t
 		 INNER JOIN (
 		     SELECT session_id, MAX(recorded_at) as max_at
