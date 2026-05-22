@@ -28,7 +28,10 @@ type Pane struct {
 // Client wraps tmux command execution.
 type Client struct {
 	// TmuxBin is the path to the tmux binary. Defaults to "tmux".
-	TmuxBin string
+	// Read/write through resolveTmuxBin() so a user-installed tmux is picked
+	// up without restarting the server.
+	TmuxBin   string
+	tmuxBinMu sync.Mutex
 	// SocketPath is an explicit tmux socket path (-S flag).
 	// If set, all commands use this socket for consistent session visibility
 	// across different launch contexts (terminal vs app bundle).
@@ -44,6 +47,48 @@ type Client struct {
 	socketsMu      sync.RWMutex
 }
 
+// resolveTmuxBin returns the path used to invoke tmux, re-checking the
+// filesystem if the cached binary isn't reachable. This lets a tmux that
+// was installed after the server started be picked up on the next command,
+// rather than requiring a restart.
+func (c *Client) resolveTmuxBin() string {
+	c.tmuxBinMu.Lock()
+	defer c.tmuxBinMu.Unlock()
+	// Absolute path that still exists — keep using it.
+	if filepath.IsAbs(c.TmuxBin) {
+		if _, err := os.Stat(c.TmuxBin); err == nil {
+			return c.TmuxBin
+		}
+	} else if _, err := exec.LookPath(c.TmuxBin); err == nil {
+		return c.TmuxBin
+	}
+	// Cached path no longer works — re-search common locations.
+	if p, ok := IsAvailable(); ok {
+		c.TmuxBin = p
+		return p
+	}
+	return c.TmuxBin
+}
+
+// commonTmuxPaths are checked when tmux is not on PATH (native app bundles
+// may not inherit a shell PATH that includes Homebrew).
+var commonTmuxPaths = []string{"/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"}
+
+// IsAvailable reports whether tmux can be found on PATH or in a common
+// install location. The returned path is the resolved binary (or "tmux"
+// if it was found on PATH).
+func IsAvailable() (string, bool) {
+	if p, err := exec.LookPath("tmux"); err == nil {
+		return p, true
+	}
+	for _, p := range commonTmuxPaths {
+		if _, err := os.Stat(p); err == nil {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // NewClient creates a new tmux Client.
 // coralDir is the root data directory (e.g. ~/.coral). The tmux socket is
 // placed at <coralDir>/tmux.sock. Pass "" to use CORAL_TMUX_SOCKET env var
@@ -53,7 +98,7 @@ func NewClient(coralDir ...string) *Client {
 
 	// Find tmux binary if not on PATH (native app may not have /opt/homebrew/bin)
 	if _, err := exec.LookPath(c.TmuxBin); err != nil {
-		for _, p := range []string{"/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"} {
+		for _, p := range commonTmuxPaths {
 			if _, err := os.Stat(p); err == nil {
 				c.TmuxBin = p
 				break
@@ -110,7 +155,7 @@ func (c *Client) listPanesOnSocket(ctx context.Context, socketPath string) []Pan
 	if socketPath != "" {
 		args = append([]string{"-S", socketPath}, args...)
 	}
-	cmd := exec.CommandContext(ctx, c.TmuxBin, args...)
+	cmd := exec.CommandContext(ctx, c.resolveTmuxBin(), args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -255,7 +300,7 @@ func (c *Client) pasteToTarget(ctx context.Context, target, text string) error {
 	if socketPath != "" {
 		args = append([]string{"-S", socketPath}, args...)
 	}
-	cmd := exec.CommandContext(ctx, c.TmuxBin, args...)
+	cmd := exec.CommandContext(ctx, c.resolveTmuxBin(), args...)
 	cmd.Stdin = strings.NewReader(text)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("load-buffer failed: %w", err)
@@ -565,7 +610,7 @@ func (c *Client) runOnSocket(ctx context.Context, socketPath string, args ...str
 	if socketPath != "" {
 		args = append([]string{"-S", socketPath}, args...)
 	}
-	cmd := exec.CommandContext(ctx, c.TmuxBin, args...)
+	cmd := exec.CommandContext(ctx, c.resolveTmuxBin(), args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
