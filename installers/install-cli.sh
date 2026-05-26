@@ -18,7 +18,7 @@ fi
 LINK_DIR="/usr/local/bin"
 mkdir -p "$LINK_DIR"
 
-TOOLS=(coral coral-board launch-coral coral-hook-agentic-state coral-hook-message-check coral-hook-task-sync)
+TOOLS=(coral coral-board launch-coral coral-hook-agentic-state coral-hook-message-check coral-hook-session-start coral-hook-task-sync)
 
 echo "Installing Coral CLI tools to $LINK_DIR..."
 for tool in "${TOOLS[@]}"; do

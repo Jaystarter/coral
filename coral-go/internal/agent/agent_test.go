@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -21,6 +22,50 @@ func findTempFile(t *testing.T, prefix, sessionID, ext string) string {
 		t.Fatalf("no temp file found matching %s", pattern)
 	}
 	return matches[len(matches)-1]
+}
+
+func useTempCodexHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(filepath.Join(codexHome, "sessions"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(codexHome, "plugins", "cache"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := `model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+
+[features]
+multi_agent = true
+
+[mcp_servers.miro]
+url = "https://mcp.miro.com"
+
+[mcp_servers.dropbox-dash-mcp]
+url = "https://mcp.dropbox.com/dash"
+
+[mcp_servers.databricks_sql_fast]
+command = "python3"
+
+[mcp_servers.databricks_sql_fast.env]
+FAST_DATABRICKS_WAREHOUSE_ID = "warehouse"
+
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[projects."/"]
+trust_level = "trusted"
+`
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"auth_mode":"chatgpt"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	return home
 }
 
 // ── Factory Tests ───────────────────────────────────────────
@@ -198,6 +243,20 @@ func TestClaude_PermissionModeWithOtherFlags(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "--verbose") {
 		t.Errorf("expected --verbose flag, got %q", cmd)
+	}
+}
+
+func TestClaude_DropsCodexBypassFlag(t *testing.T) {
+	a := &ClaudeAgent{}
+	cmd := a.BuildLaunchCommand(LaunchParams{
+		SessionID: "s1",
+		Flags:     []string{"--dangerously-bypass-approvals-and-sandbox"},
+	})
+	if strings.Contains(cmd, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("did not expect Codex bypass flag in Claude command, got %q", cmd)
+	}
+	if !strings.Contains(cmd, "--permission-mode bypassPermissions") {
+		t.Errorf("expected Claude permission mode fallback, got %q", cmd)
 	}
 }
 
@@ -393,8 +452,11 @@ func TestCodex_SystemPromptSeparation(t *testing.T) {
 func TestCodex_WithCapabilities_FullAuto(t *testing.T) {
 	a := &CodexAgent{}
 	cmd := a.BuildLaunchCommand(LaunchParams{Capabilities: &Capabilities{Allow: []string{CapShell}}})
-	if !strings.Contains(cmd, "--full-auto") {
-		t.Errorf("expected --full-auto, got %q", cmd)
+	if strings.Contains(cmd, "--full-auto") {
+		t.Errorf("did not expect deprecated --full-auto, got %q", cmd)
+	}
+	if !strings.Contains(cmd, "--sandbox workspace-write") || !strings.Contains(cmd, "-a on-request") {
+		t.Errorf("expected workspace-write/on-request, got %q", cmd)
 	}
 }
 
@@ -475,8 +537,16 @@ func TestCodex_ResumeWithPromptAndInstructions(t *testing.T) {
 func TestCodex_FlagTranslation(t *testing.T) {
 	a := &CodexAgent{}
 	cmd := a.BuildLaunchCommand(LaunchParams{Flags: []string{"--dangerously-skip-permissions"}})
-	if strings.Contains(cmd, "--dangerously-skip-permissions") || !strings.Contains(cmd, "--full-auto") {
+	if strings.Contains(cmd, "--dangerously-skip-permissions") || strings.Contains(cmd, "--full-auto") || !strings.Contains(cmd, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Errorf("expected flag translation, got %q", cmd)
+	}
+}
+
+func TestCodex_DropsLegacyFullAutoFlag(t *testing.T) {
+	a := &CodexAgent{}
+	cmd := a.BuildLaunchCommand(LaunchParams{Flags: []string{"--full-auto"}})
+	if strings.Contains(cmd, "--full-auto") || !strings.Contains(cmd, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("expected legacy full-auto translation, got %q", cmd)
 	}
 }
 
@@ -1010,13 +1080,107 @@ func TestSanitizeShellValue_StripsDangerousChars(t *testing.T) {
 }
 
 func TestCodex_EnvVarsExported(t *testing.T) {
+	home := useTempCodexHome(t)
 	a := &CodexAgent{}
-	cmd := a.BuildLaunchCommand(LaunchParams{SessionName: "codex-abc123", Role: "developer"})
+	cmd := a.BuildLaunchCommand(LaunchParams{SessionID: "abc123", SessionName: "codex-abc123", Role: "developer"})
+	if !strings.Contains(cmd, "unset CODEX_CI CODEX_SHELL CODEX_THREAD_ID") {
+		t.Errorf("expected inherited Codex env reset, got %q", cmd)
+	}
 	if !strings.Contains(cmd, "export CORAL_SESSION_NAME='codex-abc123' &&") {
 		t.Errorf("expected exported single-quoted session name, got %q", cmd)
 	}
 	if !strings.Contains(cmd, "export CORAL_SUBSCRIBER_ID='developer' &&") {
 		t.Errorf("expected exported single-quoted role, got %q", cmd)
+	}
+	if want := "export CODEX_HOME=" + filepath.Join(home, ".coral", "codex-home", "abc123"); !strings.Contains(cmd, want) {
+		t.Errorf("expected isolated CODEX_HOME export %q, got %q", want, cmd)
+	}
+	if strings.Contains(cmd, ".coral/codex-workspaces") || strings.Contains(cmd, "-C ") {
+		t.Errorf("did not expect Coral-managed Codex launch to override working directory, got %q", cmd)
+	}
+}
+
+func TestCodex_CoralManagedLaunchDisablesMCPStartup(t *testing.T) {
+	home := useTempCodexHome(t)
+	a := &CodexAgent{}
+	workingDir := filepath.Join(home, "Personal Projects", "coral")
+	cmd := a.BuildLaunchCommand(LaunchParams{SessionID: "abc123", SessionName: "codex-abc123", WorkingDir: workingDir})
+	for _, want := range []string{
+		"-c 'mcp_servers={}'",
+		"-c mcp_servers.databricks_sql_fast.enabled=false",
+		"-c mcp_servers.dropbox-dash-mcp.enabled=false",
+		"-c mcp_servers.miro.enabled=false",
+		"--disable apps",
+		"--disable plugins",
+		"--disable plugin_sharing",
+		"--disable skill_mcp_dependency_install",
+		"--disable tool_suggest",
+		"--disable tool_call_mcp_elicitation",
+		"--disable in_app_browser",
+		"--disable multi_agent",
+		"--disable hooks",
+		"--disable plugin_hooks",
+		"--disable external_migration",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("expected %q in Coral-managed Codex launch, got %q", want, cmd)
+		}
+	}
+	configPath := filepath.Join(home, ".coral", "codex-home", "abc123", "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText := string(config)
+	if strings.Contains(configText, "mcp_servers") || strings.Contains(configText, "plugins.") {
+		t.Fatalf("expected isolated config to remove MCP/plugin sections, got:\n%s", configText)
+	}
+	if !strings.Contains(configText, `trust_level = "trusted"`) {
+		t.Fatalf("expected isolated config to preserve project trust, got:\n%s", configText)
+	}
+	if want := "[projects." + strconv.Quote(workingDir) + "]"; !strings.Contains(configText, want) {
+		t.Fatalf("expected isolated config to trust launch working dir %q, got:\n%s", want, configText)
+	}
+	if !strings.Contains(configText, "multi_agent = false") {
+		t.Fatalf("expected isolated config to disable multi_agent, got:\n%s", configText)
+	}
+	if !strings.Contains(configText, "in_app_browser = false") || !strings.Contains(configText, "tool_suggest = false") {
+		t.Fatalf("expected isolated config to disable dynamic browser/tool startup, got:\n%s", configText)
+	}
+	if !strings.Contains(configText, "[skills]\ninclude_instructions = false") {
+		t.Fatalf("expected isolated config to disable skill instructions, got:\n%s", configText)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".coral", "codex-home", "abc123", "plugins")); !os.IsNotExist(err) {
+		t.Fatalf("expected per-session Codex home not to inherit plugin cache, stat err=%v", err)
+	}
+}
+
+func TestConfiguredCodexMCPServerNames(t *testing.T) {
+	useTempCodexHome(t)
+	names := configuredCodexMCPServerNames()
+	want := []string{"databricks_sql_fast", "dropbox-dash-mcp", "miro"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("configuredCodexMCPServerNames() = %v, want %v", names, want)
+	}
+	if parts := tomlSectionPath(`mcp_servers."quoted.name".env`); strings.Join(parts, ",") != "mcp_servers,quoted.name,env" {
+		t.Fatalf("tomlSectionPath parsed quoted section as %v", parts)
+	}
+}
+
+func TestCodex_CoralManagedHomeWorkingDirPreservesLaunchDirectory(t *testing.T) {
+	home := useTempCodexHome(t)
+	a := &CodexAgent{}
+	cmd := a.BuildLaunchCommand(LaunchParams{SessionID: "abc123", SessionName: "codex-abc123", WorkingDir: home})
+	if strings.Contains(cmd, ".coral/codex-workspaces") || strings.Contains(cmd, "-C ") {
+		t.Fatalf("did not expect home working dir to be replaced with an isolated project root, got %q", cmd)
+	}
+	configPath := filepath.Join(home, ".coral", "codex-home", "abc123", "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[projects." + strconv.Quote(home) + "]"; !strings.Contains(string(config), want) {
+		t.Fatalf("expected isolated config to trust launch working dir %q, got:\n%s", want, string(config))
 	}
 }
 
@@ -1032,6 +1196,7 @@ func TestGemini_EnvVarsExported(t *testing.T) {
 }
 
 func TestCodex_EnvVarsSanitized(t *testing.T) {
+	useTempCodexHome(t)
 	a := &CodexAgent{}
 	cmd := a.BuildLaunchCommand(LaunchParams{SessionName: `$(evil)`, Role: "`whoami`"})
 	if strings.Contains(cmd, "$") || strings.Contains(cmd, "`") {

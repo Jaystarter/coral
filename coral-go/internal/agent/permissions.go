@@ -174,7 +174,8 @@ func TranslateToCodexPermissions(caps *Capabilities) *CodexPermissions {
 		return perms
 	}
 
-	// Shell with no deny → --full-auto (workspace-write + on-request)
+	// Shell with no deny → workspace-write + on-request. Older Codex CLIs
+	// exposed this as --full-auto; current Codex expects the explicit flags.
 	if allowSet[CapShell] && !hasDeny {
 		perms.FullAuto = true
 		return perms

@@ -50,21 +50,22 @@ func (p *PTYSessionTerminal) FindSession(_ context.Context, name, agentType, ses
 	return nil, nil
 }
 
-func (p *PTYSessionTerminal) CaptureOutput(_ context.Context, name string, _ int, _, _ string) (string, error) {
-	data, err := p.backend.Replay(name)
+func (p *PTYSessionTerminal) CaptureOutput(_ context.Context, name string, _ int, agentType, sessionID string) (string, error) {
+	data, err := p.backend.Replay(p.resolveBackendName(name, agentType, sessionID))
 	if err != nil {
 		return "", err
 	}
 	return string(data), nil
 }
 
-func (p *PTYSessionTerminal) SendInput(_ context.Context, name, command, _, _ string) error {
-	return p.backend.SendInput(name, []byte(command+"\n"))
+func (p *PTYSessionTerminal) SendInput(_ context.Context, name, command, agentType, sessionID string) error {
+	return p.backend.SendInput(p.resolveBackendName(name, agentType, sessionID), []byte(command+"\n"))
 }
 
-func (p *PTYSessionTerminal) SendRawInput(_ context.Context, name string, keys []string, _, _ string) error {
+func (p *PTYSessionTerminal) SendRawInput(_ context.Context, name string, keys []string, agentType, sessionID string) error {
+	target := p.resolveBackendName(name, agentType, sessionID)
 	for _, key := range keys {
-		if err := p.backend.SendInput(name, []byte(key)); err != nil {
+		if err := p.backend.SendInput(target, []byte(key)); err != nil {
 			return err
 		}
 	}
@@ -73,11 +74,11 @@ func (p *PTYSessionTerminal) SendRawInput(_ context.Context, name string, keys [
 
 func (p *PTYSessionTerminal) SendToTarget(_ context.Context, target, command string) error {
 	// Target is session name in PTY mode
-	return p.backend.SendInput(target, []byte(command+"\n"))
+	return p.backend.SendInput(p.resolveBackendName(target, "", ""), []byte(command+"\n"))
 }
 
 func (p *PTYSessionTerminal) SendTerminalInput(_ context.Context, target, data string) error {
-	return p.backend.SendInput(target, []byte(data))
+	return p.backend.SendInput(p.resolveBackendName(target, "", ""), []byte(data))
 }
 
 func (p *PTYSessionTerminal) CreateSession(_ context.Context, name, workDir string) error {
@@ -126,6 +127,26 @@ func (p *PTYSessionTerminal) killByAnyKey(_ context.Context, name, agentType, se
 	return fmt.Errorf("session %q not found", name)
 }
 
+func (p *PTYSessionTerminal) resolveBackendName(name, agentType, sessionID string) string {
+	if name != "" && p.backend.IsRunning(name) {
+		return name
+	}
+	if sessionID != "" && agentType != "" {
+		composed := naming.SessionName(agentType, sessionID)
+		if p.backend.IsRunning(composed) {
+			return composed
+		}
+	}
+	for _, s := range p.backend.ListSessions() {
+		sessName := naming.SessionName(s.AgentType, s.SessionID)
+		if (sessionID != "" && s.SessionID == sessionID) ||
+			(name != "" && (s.AgentName == name || sessName == name || filepath.Base(s.WorkingDir) == name)) {
+			return s.AgentName
+		}
+	}
+	return name
+}
+
 func (p *PTYSessionTerminal) RestartPane(_ context.Context, target, _ string) error {
 	return p.backend.Restart(target, "")
 }
@@ -136,8 +157,8 @@ func (p *PTYSessionTerminal) RenameSession(_ context.Context, _, _ string) error
 	return nil
 }
 
-func (p *PTYSessionTerminal) ResizeSession(_ context.Context, name string, columns int, _, _ string) error {
-	return p.backend.Resize(name, uint16(columns), 50)
+func (p *PTYSessionTerminal) ResizeSession(_ context.Context, name string, columns int, agentType, sessionID string) error {
+	return p.backend.Resize(p.resolveBackendName(name, agentType, sessionID), uint16(columns), 50)
 }
 
 func (p *PTYSessionTerminal) ResizeTarget(_ context.Context, target string, columns, rows int) error {

@@ -249,22 +249,27 @@
                                     </label>
                                 </div>
                             </div>
+                            <div class="team-launch-defaults">
+                                <label>Agent Type:
+                                    <select id="team-agent-type" class="settings-select">
+                                        <option value="codex">Codex</option>
+                                        <option value="claude">Claude</option>
+                                        <option value="gemini">Gemini</option>
+                                        <option value="pi">Pi</option>
+                                    </select>
+                                </label>
+                                <label class="team-agent-model-wrap">Default Model <span class="text-muted-sm">(optional)</span>:
+                                    <input type="text" id="team-agent-model" class="settings-input settings-mono-input" list="team-agent-models" placeholder="Leave blank to use CLI default" autocomplete="off">
+                                    <datalist id="team-agent-models"></datalist>
+                                </label>
+                                <div class="team-settings-note">New team agents use these defaults. Each agent row can still override type and model before launch.</div>
+                            </div>
                             <details class="team-advanced">
                                 <summary>Advanced</summary>
                                 <div class="team-advanced-body">
                                     <div>
                                         <label>Remote Server <span class="text-muted-sm">(optional)</span>:
                                             <input type="text" id="team-board-server" placeholder="e.g. http://remote-machine:8420">
-                                        </label>
-                                    </div>
-                                    <div class="team-launch-type-row">
-                                        <label>Agent Type:
-                                            <select id="team-agent-type">
-                                                <option value="claude">Claude</option>
-                                                <option value="gemini">Gemini</option>
-                                                <option value="codex">Codex</option>
-                                                <option value="pi">Pi</option>
-                                            </select>
                                         </label>
                                     </div>
                                     <label style="display:none">Backend:
@@ -351,7 +356,7 @@
                     <textarea id="team-wizard-directive" rows="5" placeholder="Example: Build a launch plan for a developer tool aimed at small engineering teams. The team should uncover positioning, messaging, onboarding friction, and a realistic release strategy."></textarea>
                 </label>
                 <label for="team-wizard-composition">Team Composition
-                    <textarea id="team-wizard-composition" rows="4" placeholder="Example: Create 5 agents: an orchestrator, product strategist, GTM marketer, UX researcher, and launch copywriter. Use Claude by default, but make the researcher a stronger reasoning model."></textarea>
+                    <textarea id="team-wizard-composition" rows="4" placeholder="Example: Create 5 agents: an orchestrator, product strategist, GTM marketer, UX researcher, and launch copywriter. Use my default agent type, but make the researcher a stronger reasoning model."></textarea>
                 </label>
                 <div id="team-wizard-error" class="team-wizard-error" style="display:none"></div>
             </div>
@@ -537,9 +542,9 @@
                 <dt>Default Agent Type</dt>
                 <dd>
                     <select id="settings-agent-type" class="settings-select">
+                        <option value="codex">Codex</option>
                         <option value="claude">Claude</option>
                         <option value="gemini">Gemini</option>
-                        <option value="codex">Codex</option>
                         <option value="pi">Pi</option>
                     </select>
                 </dd>
@@ -857,9 +862,9 @@
                         </label>
                         <label>Agent Type:
                             <select id="job-modal-agent" onchange="window._updatePermFlagButtons && window._updatePermFlagButtons(this)">
+                                <option value="codex">Codex</option>
                                 <option value="claude">Claude</option>
                                 <option value="gemini">Gemini</option>
-                                <option value="codex">Codex</option>
                                 <option value="pi">Pi</option>
                             </select>
                         </label>

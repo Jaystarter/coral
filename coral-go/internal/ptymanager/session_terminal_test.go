@@ -26,8 +26,13 @@ func newTestTerminal(t *testing.T) (*PTYSessionTerminal, *PTYBackend) {
 
 func spawnTestSession(t *testing.T, backend *PTYBackend, name string) {
 	t.Helper()
+	spawnTestSessionWithMeta(t, backend, name, "claude", "test-sess-id-000000000000000000000000000000000001")
+}
+
+func spawnTestSessionWithMeta(t *testing.T, backend *PTYBackend, name, agentType, sessionID string) {
+	t.Helper()
 	dir := t.TempDir()
-	err := backend.Spawn(name, "claude", dir, "test-sess-id-000000000000000000000000000000000001", "", 80, 24)
+	err := backend.Spawn(name, agentType, dir, sessionID, "", 80, 24)
 	if err != nil && strings.Contains(err.Error(), "operation not permitted") {
 		t.Skip("PTY spawn not permitted in this environment (sandbox)")
 	}
@@ -174,6 +179,23 @@ func TestPTYSessionTerminal_SendInput_CaptureOutput(t *testing.T) {
 	output, err := terminal.CaptureOutput(context.Background(), "io-test", 200, "", "")
 	require.NoError(t, err)
 	assert.Contains(t, output, "hello-coral")
+}
+
+func TestPTYSessionTerminal_SendInput_ResolvesBySessionID(t *testing.T) {
+	skipIfWindows(t)
+	terminal, backend := newTestTerminal(t)
+
+	sessionID := "11111111-1111-1111-1111-111111111111"
+	spawnTestSessionWithMeta(t, backend, "codex-"+sessionID, "codex", sessionID)
+	time.Sleep(300 * time.Millisecond)
+
+	err := terminal.SendInput(context.Background(), "jmcnab", "echo routed-by-session-id", "codex", sessionID)
+	require.NoError(t, err)
+	time.Sleep(500 * time.Millisecond)
+
+	output, err := terminal.CaptureOutput(context.Background(), "jmcnab", 200, "codex", sessionID)
+	require.NoError(t, err)
+	assert.Contains(t, output, "routed-by-session-id")
 }
 
 func TestPTYSessionTerminal_SendRawInput(t *testing.T) {

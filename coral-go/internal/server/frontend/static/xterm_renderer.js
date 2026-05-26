@@ -119,7 +119,7 @@ function _setSessionEndedOverlay(visible) {
     if (visible && !_restarting) {
         // Before showing "Session ended", check if we can reach the server.
         // If we can't, show "Lost connection" instead of "Restart Agent".
-        fetch("/api/sessions", { method: "GET", signal: AbortSignal.timeout(3000) })
+        fetch("/api/sessions/live", { method: "GET", signal: AbortSignal.timeout(3000) })
             .then(() => {
                 overlay.style.display = "";
                 const defaultContent = document.getElementById("session-ended-default");
@@ -766,7 +766,7 @@ export function connectTerminalWs(name, agentType, sessionId) {
                     && state.currentSession
                     && state.currentSession.session_id === sessionId) {
                     connectTerminalWs(
-                        state.currentSession.name,
+                        state.currentSession.tmux_session || state.currentSession.name,
                         state.currentSession.agent_type,
                         state.currentSession.session_id,
                     );

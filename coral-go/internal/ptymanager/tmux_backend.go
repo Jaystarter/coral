@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -66,7 +65,10 @@ func (b *TmuxBackend) Spawn(name, agentType, workDir, sessionID, command string,
 	// Create empty log file
 	os.WriteFile(logPath, []byte{}, 0644)
 
-	// Create tmux session
+	// Create tmux session with an initial shell, attach logging, then respawn
+	// with the agent command. Starting the agent as the pane command avoids
+	// typing into an interactive shell, and attaching pipe-pane first preserves
+	// early output.
 	if err := b.client.NewSession(ctx, tmuxName, workDir); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
@@ -79,9 +81,10 @@ func (b *TmuxBackend) Spawn(name, agentType, workDir, sessionID, command string,
 	paneTitle := fmt.Sprintf("%s — %s", folderName, agentType)
 	b.client.SetPaneTitle(ctx, tmuxName+".0", paneTitle)
 
-	// Launch the agent command
 	if command != "" {
-		b.client.SendKeysToTarget(ctx, tmuxName+".0", command)
+		if err := b.client.RespawnPaneWithCommand(ctx, tmuxName+".0", workDir, TmuxKeepAliveCommand(command)); err != nil {
+			return fmt.Errorf("tmux respawn-pane: %w", err)
+		}
 	}
 
 	// Track session
@@ -142,20 +145,23 @@ func (b *TmuxBackend) Restart(name, command string) error {
 		return fmt.Errorf("pane not found for %q", name)
 	}
 
-	// Close pipe-pane, respawn, re-establish
+	// Re-establish pipe-pane before respawning so early command output is not
+	// lost.
 	b.client.ClosePipePane(ctx, pane.Target)
-	if err := b.client.RespawnPane(ctx, pane.Target, sess.info.WorkingDir); err != nil {
+	b.client.PipePane(ctx, pane.Target, sess.logPath)
+	if err := b.client.RespawnPaneWithCommand(ctx, pane.Target, sess.info.WorkingDir, TmuxKeepAliveCommand(command)); err != nil {
 		return err
 	}
 
-	time.Sleep(500 * time.Millisecond)
-	b.client.PipePane(ctx, pane.Target, sess.logPath)
-
-	if command != "" {
-		b.client.SendKeysToTarget(ctx, pane.Target, command)
-	}
-
 	return nil
+}
+
+func TmuxKeepAliveCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	return "(" + command + "); exec \"${SHELL:-/bin/sh}\" -l"
 }
 
 func (b *TmuxBackend) SendInput(name string, data []byte) error {

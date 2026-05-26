@@ -257,21 +257,26 @@ func (a *ClaudeAgent) BuildLaunchCommand(params LaunchParams) string {
 	settingsFile := writeTempFile("settings", effectiveID, "json", append(data, '\n'))
 	parts = append(parts, "--settings", settingsFile)
 
-	if len(params.Flags) > 0 {
-		parts = append(parts, params.Flags...)
+	claudeFlags, inferredBypass := normalizeClaudeLaunchFlags(params.Flags)
+	if len(claudeFlags) > 0 {
+		parts = append(parts, claudeFlags...)
 	}
 
 	// Add --permission-mode from settings only if Flags didn't already include it
-	if params.PermissionMode != "" && params.PermissionMode != "default" {
+	permissionMode := params.PermissionMode
+	if inferredBypass && (permissionMode == "" || permissionMode == "default") {
+		permissionMode = "bypassPermissions"
+	}
+	if permissionMode != "" && permissionMode != "default" {
 		hasPermMode := false
-		for _, f := range params.Flags {
-			if f == "--permission-mode" {
+		for _, f := range claudeFlags {
+			if f == "--permission-mode" || strings.HasPrefix(f, "--permission-mode=") {
 				hasPermMode = true
 				break
 			}
 		}
 		if !hasPermMode {
-			parts = append(parts, "--permission-mode", params.PermissionMode)
+			parts = append(parts, "--permission-mode", permissionMode)
 		}
 	}
 
@@ -284,6 +289,37 @@ func (a *ClaudeAgent) BuildLaunchCommand(params LaunchParams) string {
 	}
 
 	return strings.Join(ShellQuoteParts(parts), " ")
+}
+
+func normalizeClaudeLaunchFlags(flags []string) ([]string, bool) {
+	if len(flags) == 0 {
+		return flags, false
+	}
+	clean := make([]string, 0, len(flags))
+	inferredBypass := false
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		switch flag {
+		case "--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--yolo", "--search":
+			inferredBypass = inferredBypass || flag != "--search"
+			slog.Warn("dropping non-Claude flag for Claude agent", "flag", flag)
+			continue
+		case "--sandbox", "-a", "--approval-mode":
+			if i+1 < len(flags) {
+				i++
+			}
+			inferredBypass = true
+			slog.Warn("dropping non-Claude flag for Claude agent", "flag", flag)
+			continue
+		}
+		if strings.HasPrefix(flag, "--sandbox=") || strings.HasPrefix(flag, "--approval-mode=") {
+			inferredBypass = true
+			slog.Warn("dropping non-Claude flag for Claude agent", "flag", strings.SplitN(flag, "=", 2)[0])
+			continue
+		}
+		clean = append(clean, flag)
+	}
+	return clean, inferredBypass
 }
 
 func (a *ClaudeAgent) PrepareResume(sessionID, workingDir string) {

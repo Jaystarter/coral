@@ -128,7 +128,7 @@ func (h *SessionsHandler) resolveModel(ctx context.Context, agentType, requestMo
 		return ""
 	}
 	if m := strings.TrimSpace(requestModel); m != "" {
-		return m
+		return launchableModelForAgent(agentType, m, workingDir)
 	}
 	if agentType == "" {
 		return ""
@@ -136,10 +136,10 @@ func (h *SessionsHandler) resolveModel(ctx context.Context, agentType, requestMo
 	settings, err := h.ss.GetSettings(ctx)
 	if err == nil {
 		if m := strings.TrimSpace(settings["default_model_"+agentType]); m != "" {
-			return m
+			return launchableModelForAgent(agentType, m, workingDir)
 		}
 	}
-	return agent.ConfiguredModel(agentType, workingDir)
+	return launchableModelForAgent(agentType, agent.ConfiguredModel(agentType, workingDir), workingDir)
 }
 
 // defaultModelFromSettings looks up default_model_<agentType> in an already-loaded
@@ -151,17 +151,56 @@ func defaultModelFromSettings(settings map[string]string, agentType, requestMode
 		return ""
 	}
 	if m := strings.TrimSpace(requestModel); m != "" {
-		return m
+		return launchableModelForAgent(agentType, m, workingDir)
 	}
 	if agentType == "" {
 		return ""
 	}
 	if settings != nil {
 		if m := strings.TrimSpace(settings["default_model_"+agentType]); m != "" {
-			return m
+			return launchableModelForAgent(agentType, m, workingDir)
 		}
 	}
-	return agent.ConfiguredModel(agentType, workingDir)
+	return launchableModelForAgent(agentType, agent.ConfiguredModel(agentType, workingDir), workingDir)
+}
+
+func launchableModelForAgent(agentType, model, workingDir string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if agentType == at.Claude && isClaudeRuntimeModelAlias(model) {
+		if configured := strings.TrimSpace(agent.ConfiguredModel(agentType, workingDir)); configured != "" && configured != model {
+			return configured
+		}
+	}
+	return model
+}
+
+func isClaudeRuntimeModelAlias(model string) bool {
+	base, _, _ := strings.Cut(strings.TrimSpace(model), "[")
+	parts := strings.Split(base, "-")
+	if len(parts) != 4 || parts[0] != "claude" {
+		return false
+	}
+	if _, err := strconv.Atoi(parts[2]); err != nil {
+		return false
+	}
+	if _, err := strconv.Atoi(parts[3]); err != nil {
+		return false
+	}
+	return true
+}
+
+func terminalBackendKind(backend ptymanager.TerminalBackend) string {
+	switch backend.(type) {
+	case *ptymanager.PTYBackend:
+		return "pty"
+	case *ptymanager.TmuxBackend:
+		return "tmux"
+	default:
+		return ""
+	}
 }
 
 func contextWindowForLaunch(agentType, workingDir, model string) int {
@@ -193,23 +232,128 @@ func stripModelFlags(flags []string) []string {
 	return clean
 }
 
-func stripUnsupportedFlagsForAgent(agentType string, flags []string) []string {
-	if len(flags) == 0 || agentType == at.Claude {
-		return flags
-	}
-	clean := make([]string, 0, len(flags))
+func modelFromFlags(flags []string) string {
+	var model string
 	for i := 0; i < len(flags); i++ {
 		flag := flags[i]
-		if flag == "--permission-mode" {
+		if flag == "--model" || flag == "-m" {
 			if i+1 < len(flags) {
+				model = strings.TrimSpace(flags[i+1])
 				i++
 			}
 			continue
 		}
+		if strings.HasPrefix(flag, "--model=") || strings.HasPrefix(flag, "-m=") {
+			if _, value, ok := strings.Cut(flag, "="); ok {
+				model = strings.TrimSpace(value)
+			}
+		}
+	}
+	return model
+}
+
+func stripUnsupportedFlagsForAgent(agentType string, flags []string) []string {
+	if len(flags) == 0 {
+		return flags
+	}
+	clean := make([]string, 0, len(flags))
+	needsBypass := false
+	hasClaudePermMode := false
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		if flag == "--permission-mode" {
+			mode := ""
+			if i+1 < len(flags) {
+				mode = flags[i+1]
+				i++
+			}
+			if agentType == at.Claude {
+				clean = append(clean, "--permission-mode")
+				if mode != "" {
+					clean = append(clean, mode)
+				}
+				hasClaudePermMode = true
+			} else if mode != "" && mode != "default" {
+				needsBypass = true
+			}
+			continue
+		}
 		if strings.HasPrefix(flag, "--permission-mode=") {
+			mode := strings.TrimPrefix(flag, "--permission-mode=")
+			if agentType == at.Claude {
+				clean = append(clean, flag)
+				hasClaudePermMode = true
+			} else if mode != "" && mode != "default" {
+				needsBypass = true
+			}
+			continue
+		}
+		switch flag {
+		case "--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--dangerously-skip-permissions", "--yolo":
+			needsBypass = true
+			continue
+		case "--approval-mode":
+			if agentType == at.Gemini {
+				clean = append(clean, flag)
+				if i+1 < len(flags) {
+					i++
+					clean = append(clean, flags[i])
+				}
+			} else {
+				if i+1 < len(flags) {
+					i++
+				}
+				needsBypass = true
+			}
+			continue
+		case "--sandbox", "-a":
+			if agentType == at.Codex {
+				clean = append(clean, flag)
+				if i+1 < len(flags) {
+					i++
+					clean = append(clean, flags[i])
+				}
+			} else {
+				if i+1 < len(flags) {
+					i++
+				}
+				needsBypass = true
+			}
+			continue
+		case "--search":
+			if agentType != at.Codex {
+				continue
+			}
+		}
+		if strings.HasPrefix(flag, "--approval-mode=") {
+			if agentType == at.Gemini {
+				clean = append(clean, flag)
+			} else {
+				needsBypass = true
+			}
+			continue
+		}
+		if strings.HasPrefix(flag, "--sandbox=") {
+			if agentType == at.Codex {
+				clean = append(clean, flag)
+			} else {
+				needsBypass = true
+			}
 			continue
 		}
 		clean = append(clean, flag)
+	}
+	if needsBypass {
+		switch agentType {
+		case at.Claude:
+			if !hasClaudePermMode {
+				clean = append(clean, "--permission-mode", "bypassPermissions")
+			}
+		case at.Codex:
+			clean = append(clean, "--dangerously-bypass-approvals-and-sandbox")
+		case at.Gemini:
+			clean = append(clean, "--yolo")
+		}
 	}
 	return clean
 }
@@ -1779,6 +1923,8 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	storedFlagModel := modelFromFlags(storedFlags)
+
 	// Request body overrides stored values (user edited in modal)
 	if body.Prompt != "" {
 		storedPrompt = body.Prompt
@@ -1786,9 +1932,20 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	if body.Model != "" {
 		storedModel = body.Model
 		storedContextWindow = proxy.LookupContextWindow(body.Model)
+	} else if storedFlagModel != "" {
+		// The live session's model field can be updated by runtime telemetry
+		// to Claude's display alias (for example "claude-opus-4-6"), which
+		// is useful for context/cost display but is not always a valid launch
+		// argument. Prefer the original launch flag when restarting.
+		storedModel = storedFlagModel
+		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
 	}
 	if storedModel == "" {
 		storedModel = agent.ConfiguredModel(agentType, pane.CurrentPath)
+		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
+	}
+	if normalized := launchableModelForAgent(agentType, storedModel, pane.CurrentPath); normalized != storedModel {
+		storedModel = normalized
 		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
 	} else if storedContextWindow == 0 {
 		storedContextWindow = contextWindowForLaunch(agentType, pane.CurrentPath, storedModel)
@@ -1863,7 +2020,10 @@ func (h *SessionsHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		PermissionMode:  userSettings["default_permission_mode"],
 	}))
 	log.Printf("[launch] restart session=%s cmd=%s", target, cmd)
-	h.terminal.SendToTarget(ctx, target, cmd)
+	if err := h.launchCommandInPane(ctx, target, pane.CurrentPath, cmd); err != nil {
+		errInternalServer(w, err.Error())
+		return
+	}
 
 	// Capture shell PID for process-tree-based identity resolution
 	var restartPID int
@@ -2004,7 +2164,10 @@ func (h *SessionsHandler) Resume(w http.ResponseWriter, r *http.Request) {
 		MCPServers:      storedMCPServers,
 		PermissionMode:  userSettings["default_permission_mode"],
 	}))
-	h.terminal.SendToTarget(ctx, target, cmd)
+	if err := h.launchCommandInPane(ctx, target, pane.CurrentPath, cmd); err != nil {
+		errInternalServer(w, err.Error())
+		return
+	}
 
 	// Capture shell PID
 	var resumePID int
@@ -2439,6 +2602,7 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 		if cfg.Flags != nil && *cfg.Flags != "" {
 			json.Unmarshal([]byte(*cfg.Flags), &flags)
 		}
+		flagModel := modelFromFlags(flags)
 		flags = stripModelFlags(stripUnsupportedFlagsForAgent(cfg.AgentType, flags))
 		prompt := ""
 		if cfg.Prompt != nil {
@@ -2463,12 +2627,15 @@ func (h *SessionsHandler) ResetTeam(w http.ResponseWriter, r *http.Request) {
 
 		// Restore model and capabilities from saved config
 		modelStr := ""
-		if cfg.Model != nil {
+		if flagModel != "" {
+			modelStr = flagModel
+		} else if cfg.Model != nil {
 			modelStr = *cfg.Model
 		}
 		if modelStr == "" {
 			modelStr = agent.ConfiguredModel(cfg.AgentType, cfg.WorkingDir)
 		}
+		modelStr = launchableModelForAgent(cfg.AgentType, modelStr, cfg.WorkingDir)
 		var caps *agent.Capabilities
 		if cfg.Capabilities != nil && *cfg.Capabilities != "" {
 			caps = &agent.Capabilities{}
@@ -2862,6 +3029,16 @@ func generateUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+func (h *SessionsHandler) launchCommandInPane(ctx context.Context, target, workDir, command string) error {
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+	if tmuxTerm, ok := h.terminal.(*ptymanager.TmuxSessionTerminal); ok {
+		return tmuxTerm.Client().RespawnPaneWithCommand(ctx, target, workDir, ptymanager.TmuxKeepAliveCommand(command))
+	}
+	return h.terminal.SendToTarget(ctx, target, command)
+}
+
 // launchSession creates a new agent session using the specified backend (tmux or pty).
 func (h *SessionsHandler) launchSession(ctx context.Context, workDir, agentType, displayName, resumeSessionID string,
 	flags []string, prompt, boardName, boardServer, backend, boardType, model string, capabilities *agent.Capabilities,
@@ -2909,9 +3086,8 @@ func (h *SessionsHandler) launchSession(ctx context.Context, workDir, agentType,
 	}
 
 	if backend == "" {
-		if h.backend != nil {
-			backend = "pty"
-		} else {
+		backend = terminalBackendKind(h.backend)
+		if backend == "" {
 			backend = "tmux"
 		}
 	}
@@ -2959,38 +3135,24 @@ func (h *SessionsHandler) launchSession(ctx context.Context, workDir, agentType,
 		log.Printf("[launch] using custom CLI path: %s", cliPath)
 	}
 
-	if backend == "pty" && h.backend != nil {
-		// PTY backend: spawn the agent process directly
+	if activeBackend := terminalBackendKind(h.backend); activeBackend != "" {
+		backend = activeBackend
+		// Managed terminal backend: start agents as the pane/PTTY process.
+		// Typing the launch command into an interactive shell can leave
+		// full-screen CLIs in a stopped background job after their first
+		// response, which makes follow-up input land back at the shell.
 		var cmd string
 		if !isTerminal {
 			cmd = agent.WrapWithBundlePath(agentImpl.BuildLaunchCommand(launchParams))
 		}
-		// Spawn a shell first (empty command), then send the agent command as input.
-		// This matches the tmux pattern and works cross-platform — the shell
-		// interprets bash syntax like $(cat ...) correctly.
-		if err := h.backend.Spawn(sessionName, agentType, absDir, sessionID, "", 200, 50); err != nil {
-			return nil, fmt.Errorf("pty spawn failed: %w", err)
+		if cmd != "" {
+			log.Printf("[launch] %s session=%s agent=%s cmd=%s", backend, sessionName, agentType, cmd)
 		}
-		// PTY backend manages its own log file
+		if err := h.backend.Spawn(sessionName, agentType, absDir, sessionID, cmd, 200, 50); err != nil {
+			return nil, fmt.Errorf("%s spawn failed: %w", backend, err)
+		}
+		// The managed backend owns session creation and log wiring.
 		logFile = h.backend.LogPath(sessionName)
-
-		// Wait for shell to initialize, then send the launch command
-		if !isTerminal && cmd != "" {
-			log.Printf("[launch] pty session=%s agent=%s cmd=%s", sessionName, agentType, cmd)
-			if pb, ok := h.backend.(*ptymanager.PTYBackend); ok {
-				if !pb.WaitReady(sessionName, 5*time.Second) {
-					log.Printf("[launch] pty shell not ready after 5s, sending anyway: %s", sessionName)
-				}
-			} else {
-				time.Sleep(500 * time.Millisecond)
-			}
-			if err := h.backend.SendInput(sessionName, []byte(cmd)); err != nil {
-				log.Printf("[launch] pty SendInput (text) failed: %s: %v", sessionName, err)
-			}
-			if err := h.backend.SendInput(sessionName, []byte("\r")); err != nil {
-				log.Printf("[launch] pty SendInput (enter) failed: %s: %v", sessionName, err)
-			}
-		}
 	} else {
 		// Tmux backend: create session, pipe-pane, send keys
 		backend = "tmux" // normalize if pty requested but no backend available
@@ -3040,7 +3202,9 @@ func (h *SessionsHandler) launchSession(ctx context.Context, workDir, agentType,
 		if !isTerminal {
 			cmd := agent.WrapWithBundlePath(agentImpl.BuildLaunchCommand(launchParams))
 			log.Printf("[launch] tmux session=%s agent=%s cmd=%s", sessionName, agentType, cmd)
-			h.terminal.SendToTarget(ctx, sessionName+".0", cmd)
+			if err := h.launchCommandInPane(ctx, sessionName+".0", absDir, cmd); err != nil {
+				return nil, fmt.Errorf("tmux launch command failed: %w", err)
+			}
 		}
 	}
 
@@ -3792,6 +3956,9 @@ func (h *SessionsHandler) wakeExistingSession(ctx context.Context, ls *store.Liv
 	if ls.Backend != nil {
 		backend = *ls.Backend
 	}
+	if activeBackend := terminalBackendKind(h.backend); activeBackend != "" {
+		backend = activeBackend
+	}
 	displayName := derefStrPtr(ls.DisplayName)
 	boardType := derefStrPtr(ls.BoardType)
 	_ = boardServer // retained for future use
@@ -3840,21 +4007,12 @@ func (h *SessionsHandler) wakeExistingSession(ctx context.Context, ls *store.Liv
 		cmd := agent.WrapWithBundlePath(agentImpl.BuildLaunchCommand(launchParams))
 		log.Printf("[wake] session=%s agent=%s backend=%s cmd=%s", sessionName, ls.AgentType, backend, cmd)
 
-		if backend == "pty" && h.backend != nil {
-			// PTY backend: spawn shell, then send command
-			if err := h.backend.Spawn(sessionName, ls.AgentType, ls.WorkingDir, ls.SessionID, "", 200, 50); err != nil {
-				return fmt.Errorf("pty spawn failed: %w", err)
-			}
-			if cmd != "" {
-				if pb, ok := h.backend.(*ptymanager.PTYBackend); ok {
-					if !pb.WaitReady(sessionName, 5*time.Second) {
-						log.Printf("[launch] pty shell not ready after 5s, sending anyway: %s", sessionName)
-					}
-				} else {
-					time.Sleep(500 * time.Millisecond)
-				}
-				h.backend.SendInput(sessionName, []byte(cmd))
-				h.backend.SendInput(sessionName, []byte("\r"))
+		if activeBackend := terminalBackendKind(h.backend); activeBackend != "" {
+			backend = activeBackend
+			// Managed terminal backend: start the agent command directly as
+			// the pane/PTTY process.
+			if err := h.backend.Spawn(sessionName, ls.AgentType, ls.WorkingDir, ls.SessionID, cmd, 200, 50); err != nil {
+				return fmt.Errorf("%s spawn failed: %w", backend, err)
 			}
 		} else {
 			// tmux backend: create session with the EXISTING session name
@@ -3867,7 +4025,9 @@ func (h *SessionsHandler) wakeExistingSession(ctx context.Context, ls *store.Liv
 			folderName := filepath.Base(ls.WorkingDir)
 			h.terminal.SetPaneTitle(ctx, sessionName+".0", fmt.Sprintf("%s — %s", folderName, ls.AgentType))
 
-			h.terminal.SendToTarget(ctx, sessionName+".0", cmd)
+			if err := h.launchCommandInPane(ctx, sessionName+".0", ls.WorkingDir, cmd); err != nil {
+				return fmt.Errorf("tmux wake launch command failed: %w", err)
+			}
 
 			// Capture shell PID
 			if tmuxTerm, ok := h.terminal.(*ptymanager.TmuxSessionTerminal); ok {

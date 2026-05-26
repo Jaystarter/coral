@@ -184,6 +184,35 @@ func TestWSTerminal_ConnectAndReplay(t *testing.T) {
 	conn.Close(websocket.StatusNormalClosure, "done")
 }
 
+func TestWSTerminal_ResolvesSessionQuery(t *testing.T) {
+	backend, _ := newTerminalTestTmuxBackend(t)
+	server := setupTerminalTestServer(t, backend)
+
+	sessionID := "12345678-1111-2222-3333-444444444444"
+	spawnTestSession(t, backend, "query-agent", sessionID, "sh")
+	time.Sleep(500 * time.Millisecond)
+
+	wsURL := "ws" + server.URL[4:] + "/ws/terminal/.?agent_type=claude&session_id=" + sessionID
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.CloseNow() })
+	defer cancel()
+
+	// Read replay, then verify input reaches the canonical tmux session even
+	// though the path name is not the tmux session name.
+	readOneBinaryFrame(t, ctx, conn)
+	sendTerminalJSON(t, ctx, conn, map[string]any{
+		"type": "terminal_input",
+		"data": "echo QUERY_INPUT_MARKER_12\n",
+	})
+
+	got := readBinaryUntilContains(t, ctx, conn, "QUERY_INPUT_MARKER_12")
+	assert.Contains(t, got, "QUERY_INPUT_MARKER_12")
+
+	conn.Close(websocket.StatusNormalClosure, "done")
+}
+
 // TestWSTerminal_ResizeUpdatesPane verifies that terminal_resize messages
 // actually change the tmux pane dimensions.
 func TestWSTerminal_ResizeUpdatesPane(t *testing.T) {

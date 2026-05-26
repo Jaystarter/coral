@@ -39,14 +39,53 @@ func TestStripModelFlags(t *testing.T) {
 	}, got)
 }
 
+func TestModelFromFlags(t *testing.T) {
+	got := modelFromFlags([]string{
+		"--model", "old-model",
+		"--search",
+		"-m=short-eq-model",
+		"--model=final-model",
+	})
+	assert.Equal(t, "final-model", got)
+	assert.Empty(t, modelFromFlags([]string{"--model"}))
+}
+
+func TestIsClaudeRuntimeModelAlias(t *testing.T) {
+	assert.True(t, isClaudeRuntimeModelAlias("claude-opus-4-6"))
+	assert.True(t, isClaudeRuntimeModelAlias("claude-opus-4-6[1m]"))
+	assert.False(t, isClaudeRuntimeModelAlias("claude-opus-4-6-20260407"))
+	assert.False(t, isClaudeRuntimeModelAlias("us.anthropic.claude-opus-4-6-v1[1m]"))
+	assert.False(t, isClaudeRuntimeModelAlias("gpt-5.5"))
+}
+
 func TestStripUnsupportedFlagsForAgent(t *testing.T) {
 	flags := []string{"--permission-mode", "bypassPermissions", "--model", "gpt-5.5", "--permission-mode=auto", "--search"}
 
 	assert.Equal(t,
-		[]string{"--model", "gpt-5.5", "--search"},
+		[]string{"--model", "gpt-5.5", "--search", "--dangerously-bypass-approvals-and-sandbox"},
 		stripUnsupportedFlagsForAgent("codex", flags),
 	)
-	assert.Equal(t, flags, stripUnsupportedFlagsForAgent("claude", flags))
+	assert.Equal(t,
+		[]string{"--permission-mode", "bypassPermissions", "--model", "gpt-5.5", "--permission-mode=auto"},
+		stripUnsupportedFlagsForAgent("claude", flags),
+	)
+}
+
+func TestStripUnsupportedFlagsForAgent_TranslatesBypassForMixedTeams(t *testing.T) {
+	flags := []string{"--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5"}
+
+	assert.Equal(t,
+		[]string{"--model", "gpt-5.5", "--permission-mode", "bypassPermissions"},
+		stripUnsupportedFlagsForAgent("claude", flags),
+	)
+	assert.Equal(t,
+		[]string{"--model", "gpt-5.5", "--yolo"},
+		stripUnsupportedFlagsForAgent("gemini", flags),
+	)
+	assert.Equal(t,
+		[]string{"--model", "gpt-5.5", "--dangerously-bypass-approvals-and-sandbox"},
+		stripUnsupportedFlagsForAgent("codex", flags),
+	)
 }
 
 // mockSessionTerminal implements ptymanager.SessionTerminal for testing.
@@ -688,10 +727,10 @@ func TestResetTeamRelaunchesAgentsAndPreservesBackend(t *testing.T) {
 	require.NotNil(t, sessions[0].Icon)
 	assert.Equal(t, "*", *sessions[0].Icon)
 	require.NotNil(t, sessions[0].Model)
-	assert.Equal(t, "stored-model", *sessions[0].Model)
+	assert.Equal(t, "old-model", *sessions[0].Model)
 	require.NotNil(t, sessions[0].Flags)
-	assert.Contains(t, *sessions[0].Flags, "stored-model")
-	assert.NotContains(t, *sessions[0].Flags, "old-model")
+	assert.Contains(t, *sessions[0].Flags, "old-model")
+	assert.NotContains(t, *sessions[0].Flags, "stored-model")
 	assert.Contains(t, terminal.killSessionCalls, "old-reset-pane")
 }
 

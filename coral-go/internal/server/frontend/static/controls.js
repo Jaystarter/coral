@@ -20,6 +20,23 @@ let commandSentAckTimer = null;
 const LARGE_TEXT_ATTACHMENT_BYTES = 24 * 1024;
 const LARGE_TEXT_ATTACHMENT_LINES = 280;
 
+function _sessionRouteName(session) {
+    if (!session) return "";
+    const tmuxSession = session.tmux_session || "";
+    if (tmuxSession && !tmuxSession.includes("/")) return tmuxSession;
+    if (session.agent_type && session.session_id) return `${session.agent_type}-${session.session_id}`;
+    if (session.session_id) return session.session_id;
+    return session.name || "";
+}
+
+function _sessionRoutePayload(session, extra = {}) {
+    return {
+        ...extra,
+        agent_type: session?.agent_type || "",
+        session_id: session?.session_id || "",
+    };
+}
+
 function _normalizeSubmittedMessage(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -156,28 +173,14 @@ export async function sendCommand() {
     const command = parts.join(" ");
     if (!command) return;
 
-    // Try WebSocket path first (sends text, then Enter separately)
-    if (pendingAttachments.length === 0) {
-        const xterm = await _getXtermModule();
-        if (xterm.sendTerminalInputWs(command)) {
-            xterm.markCommandSubmitted?.(command);
-            // Send Enter after delay so bracket paste + tmux processing completes
-            setTimeout(() => xterm.sendTerminalInputWs("\r"), 300);
-            input.value = "";
-            const key = sessionKey(state.currentSession);
-            if (key) delete state.sessionInputText[key];
-            showCommandSentAck(command);
-            xterm.focusTerminal();
-            return;
-        }
-    }
-
-    // Fall back to POST endpoint
+    // Use the POST endpoint so text and Enter are sent together through the
+    // backend path that returns an explicit success/error result.
     try {
-        const resp = await fetch(`/api/sessions/live/${encodeURIComponent(state.currentSession.name)}/send`, {
+        const routeName = _sessionRouteName(state.currentSession);
+        const resp = await fetch(`/api/sessions/live/${encodeURIComponent(routeName)}/send`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ command, agent_type: state.currentSession.agent_type, session_id: state.currentSession.session_id }),
+            body: JSON.stringify(_sessionRoutePayload(state.currentSession, { command })),
         });
         if (!resp.ok) {
             const text = await resp.text();
@@ -460,10 +463,11 @@ export async function sendRawKeys(keys, { silent = false } = {}) {
 
     // Fall back to POST endpoint for unmapped keys or when WebSocket is unavailable
     try {
-        const resp = await fetch(`/api/sessions/live/${encodeURIComponent(state.currentSession.name)}/keys`, {
+        const routeName = _sessionRouteName(state.currentSession);
+        const resp = await fetch(`/api/sessions/live/${encodeURIComponent(routeName)}/keys`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ keys, agent_type: state.currentSession.agent_type, session_id: state.currentSession.session_id }),
+            body: JSON.stringify(_sessionRoutePayload(state.currentSession, { keys })),
         });
         const result = await resp.json();
         if (result.error) {

@@ -46,7 +46,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o
 echo "==> Compiling coral-board.exe"
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o "$BUILD_DIR/coral-board.exe" ./cmd/coral-board/
 
-for hook in coral-hook-agentic-state coral-hook-task-sync coral-hook-message-check; do
+for hook in coral-hook-agentic-state coral-hook-task-sync coral-hook-message-check coral-hook-session-start; do
     echo "==> Compiling $hook.exe"
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o "$BUILD_DIR/$hook.exe" "./cmd/$hook/"
 done

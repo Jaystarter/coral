@@ -700,8 +700,7 @@ type generateJob struct {
 	CreatedAt time.Time      `json:"-"`
 }
 
-
-// GenerateTeam kicks off an async Claude CLI call and returns a job ID.
+// GenerateTeam kicks off an async CLI call and returns a job ID.
 // POST /api/teams/generate
 func (h *SystemHandler) GenerateTeam(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -727,6 +726,14 @@ func (h *SystemHandler) GenerateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings, _ := h.ss.GetSettings(r.Context())
+	defaultAgentType := strings.TrimSpace(settings["default_agent_type"])
+	if defaultAgentType == "" {
+		defaultAgentType = agenttypes.Codex
+	}
+	defaultModel := strings.TrimSpace(settings["default_model_"+defaultAgentType])
+	inputMentionsAgentType := teamGenerationMentionsAgentType(body.Directive + "\n" + body.Composition)
+
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
@@ -743,6 +750,12 @@ func (h *SystemHandler) GenerateTeam(w http.ResponseWriter, r *http.Request) {
 	h.generateJobsMu.Unlock()
 
 	prompt := teamGeneratePrompt +
+		"\n\n<coral_defaults>" +
+		"\nDefault agent_type for generated agents: " + defaultAgentType +
+		"\nDefault model for that agent type: " + defaultModel +
+		"\nUse the default agent_type unless the user explicitly requests a different agent type." +
+		"\nUse an empty model string unless the user explicitly requests a specific model; Coral applies default models at launch." +
+		"\n</coral_defaults>" +
 		"\n\n<inputs>" +
 		"\n<directive>\n" + body.Directive + "\n</directive>" +
 		"\n<composition>\n" + body.Composition + "\n</composition>" +
@@ -754,7 +767,7 @@ func (h *SystemHandler) GenerateTeam(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
-		result, errMsg := runTeamGeneration(ctx, claudePath, prompt, coralDir)
+		result, errMsg := runTeamGeneration(ctx, claudePath, prompt, coralDir, defaultAgentType, inputMentionsAgentType)
 
 		h.generateJobsMu.Lock()
 		defer h.generateJobsMu.Unlock()
@@ -794,9 +807,19 @@ func (h *SystemHandler) GenerateTeamStatus(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func teamGenerationMentionsAgentType(input string) bool {
+	lower := strings.ToLower(input)
+	for _, term := range []string{"claude", "codex", "gemini", " pi ", " pi.", " pi,", " pi\n"} {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "pi ") || strings.HasSuffix(lower, " pi")
+}
+
 // runTeamGeneration executes Claude CLI and parses/validates the response.
 // Returns (result, errorMessage). If errorMessage is non-empty, result is nil.
-func runTeamGeneration(ctx context.Context, claudePath, prompt, coralDir string) (map[string]any, string) {
+func runTeamGeneration(ctx context.Context, claudePath, prompt, coralDir, defaultAgentType string, preserveExplicitAgentTypes bool) (map[string]any, string) {
 	cmd := executil.Command(ctx, claudePath,
 		"--print",
 		"--model", "opus",
@@ -831,31 +854,45 @@ func runTeamGeneration(ctx context.Context, claudePath, prompt, coralDir string)
 		return nil, "Failed to parse LLM response as JSON"
 	}
 
+	if errMsg := normalizeGeneratedTeam(result, defaultAgentType, preserveExplicitAgentTypes); errMsg != "" {
+		return nil, errMsg
+	}
+
+	return result, ""
+}
+
+func normalizeGeneratedTeam(result map[string]any, defaultAgentType string, preserveExplicitAgentTypes bool) string {
+	if defaultAgentType == "" {
+		defaultAgentType = agenttypes.Codex
+	}
+
 	// Validate that agents array exists
 	agents, ok := result["agents"].([]any)
 	if !ok || len(agents) == 0 {
-		return nil, "Generated team has no agents"
+		return "Generated team has no agents"
 	}
 
 	// Validate and normalize each agent — fill defaults for missing fields
 	for i, a := range agents {
 		ag, ok := a.(map[string]any)
 		if !ok {
-			return nil, fmt.Sprintf("agent at index %d is not a valid object", i)
+			return fmt.Sprintf("agent at index %d is not a valid object", i)
 		}
 
 		name, _ := ag["name"].(string)
 		if strings.TrimSpace(name) == "" {
-			return nil, fmt.Sprintf("agent at index %d is missing a name", i)
+			return fmt.Sprintf("agent at index %d is missing a name", i)
 		}
 
 		agPrompt, _ := ag["prompt"].(string)
 		if strings.TrimSpace(agPrompt) == "" {
-			return nil, fmt.Sprintf("agent '%s' is missing a prompt", name)
+			return fmt.Sprintf("agent '%s' is missing a prompt", name)
 		}
 
-		if at, _ := ag["agent_type"].(string); at == "" {
-			ag["agent_type"] = "claude"
+		at, _ := ag["agent_type"].(string)
+		at = strings.TrimSpace(at)
+		if at == "" || (!preserveExplicitAgentTypes && at != defaultAgentType) {
+			ag["agent_type"] = defaultAgentType
 		}
 		if _, exists := ag["model"]; !exists {
 			ag["model"] = ""
@@ -863,12 +900,12 @@ func runTeamGeneration(ctx context.Context, claudePath, prompt, coralDir string)
 		if tools, ok := ag["tools"]; !ok || tools == nil {
 			ag["tools"] = []any{}
 		} else if _, ok := tools.([]any); !ok {
-			return nil, fmt.Sprintf("agent '%s' has invalid tools; expected array", name)
+			return fmt.Sprintf("agent '%s' has invalid tools; expected array", name)
 		}
 		if servers, ok := ag["mcpServers"]; !ok || servers == nil {
 			ag["mcpServers"] = map[string]any{}
 		} else if _, ok := servers.(map[string]any); !ok {
-			return nil, fmt.Sprintf("agent '%s' has invalid mcpServers; expected object", name)
+			return fmt.Sprintf("agent '%s' has invalid mcpServers; expected object", name)
 		}
 
 		caps, _ := ag["capabilities"].(map[string]any)
@@ -895,7 +932,7 @@ func runTeamGeneration(ctx context.Context, claudePath, prompt, coralDir string)
 		result["flags"] = ""
 	}
 
-	return result, ""
+	return ""
 }
 
 const teamGeneratePrompt = `Role and task:
@@ -925,7 +962,7 @@ The response must match this exact schema:
         "allow": ["capability1", "capability2"],
         "deny": ["capability3"]
       },
-      "agent_type": "claude",
+      "agent_type": "codex",
       "model": ""
     }
   ],
@@ -942,7 +979,7 @@ Hard platform rules:
 7. Every agent object MUST include all of these keys: "name", "prompt", "capabilities", "agent_type", and "model".
 8. If useful, agent objects MAY also include "tools" (array of strings) and "mcpServers" (object keyed by server name).
 9. Every "capabilities" object MUST include both "allow" and "deny" arrays, even if "deny" is empty.
-10. Use "claude" for "agent_type" unless the user explicitly requests a different agent type.
+10. Use the Coral default agent_type provided in <coral_defaults> unless the user explicitly requests a different agent type.
 11. Use an empty string for "model" unless the user explicitly requests a specific model for that agent.
 12. Use an empty string for "flags" unless the user explicitly requests flags.
 
@@ -984,7 +1021,7 @@ Few-shot example:
         "allow": ["file_read", "file_write", "shell", "git_write", "agent_spawn", "web_access"],
         "deny": []
       },
-      "agent_type": "claude",
+      "agent_type": "codex",
       "model": ""
     },
     {
@@ -996,7 +1033,7 @@ Few-shot example:
         "allow": ["file_read", "file_write", "shell", "git_write", "agent_spawn", "web_access"],
         "deny": []
       },
-      "agent_type": "claude",
+      "agent_type": "codex",
       "model": ""
     },
     {
@@ -1008,7 +1045,7 @@ Few-shot example:
         "allow": ["file_read", "file_write", "shell", "git_write", "agent_spawn", "web_access"],
         "deny": []
       },
-      "agent_type": "claude",
+      "agent_type": "codex",
       "model": ""
     }
   ],

@@ -205,11 +205,11 @@ func shellQuote(s string) string {
 
 // ShellQuoteParts applies shellQuote to each part in a command parts slice,
 // skipping parts that are already compound shell expressions (e.g. "$(cat ...)",
-// "export VAR=... &&") which are already properly formatted.
+// "export VAR=... &&", "unset VAR &&") which are already properly formatted.
 func ShellQuoteParts(parts []string) []string {
 	quoted := make([]string, len(parts))
 	for i, p := range parts {
-		if strings.Contains(p, "$(") || strings.HasPrefix(p, "export ") {
+		if strings.Contains(p, "$(") || strings.HasPrefix(p, "export ") || strings.HasPrefix(p, "unset ") {
 			quoted[i] = p
 		} else {
 			quoted[i] = shellQuote(p)

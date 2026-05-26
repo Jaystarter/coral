@@ -47,10 +47,16 @@ func TestNewSession_SetsEnvironment(t *testing.T) {
 	}
 }
 
-func TestNewSession_EmptyCommand(t *testing.T) {
-	_, err := newSession("empty-cmd", "test", t.TempDir(), "sid-empty", "", 80, 24)
-	if err == nil {
-		t.Error("expected error for empty command")
+func TestNewSession_EmptyCommandStartsShell(t *testing.T) {
+	canFork(t)
+	s, err := newSession("empty-cmd", "test", t.TempDir(), "sid-empty", "", 80, 24)
+	if err != nil {
+		t.Fatalf("newSession failed: %v", err)
+	}
+	defer s.kill()
+
+	if !s.isRunning() {
+		t.Error("expected shell session to be running")
 	}
 }
 
@@ -267,7 +273,7 @@ func TestSession_WorkingDirectory(t *testing.T) {
 
 func TestParseCommand_ShellMetachars(t *testing.T) {
 	tests := []struct {
-		input    string
+		input     string
 		wantShell bool
 	}{
 		{"echo hello", false},

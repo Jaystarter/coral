@@ -2480,6 +2480,21 @@
     flex-shrink: 0;
 }
 
+.team-launch-defaults {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 10px;
+    padding: 12px;
+    margin: 12px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+}
+
+.team-launch-defaults .team-settings-note {
+    grid-column: 1 / -1;
+}
+
 .team-agent-row {
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
@@ -2496,8 +2511,11 @@
 
 /* Collapsed card summary */
 .team-agent-summary {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "identity actions"
+        "controls actions";
     align-items: center;
     padding: 10px 12px;
     cursor: pointer;
@@ -2505,16 +2523,25 @@
 }
 
 .team-agent-summary-left {
+    grid-area: identity;
     display: flex;
     flex-direction: column;
     min-width: 0;
-    flex: 1;
 }
 
 .team-agent-role-name {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.team-agent-type-model-summary {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2533,10 +2560,44 @@
 }
 
 .team-agent-summary-actions {
+    grid-area: actions;
     display: flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+}
+
+.team-agent-inline-controls {
+    grid-area: controls;
+    display: grid;
+    grid-template-columns: 94px minmax(130px, 190px);
+    gap: 6px;
+    align-items: end;
+    justify-content: start;
+    margin-top: 6px;
+}
+
+.team-agent-inline-label {
+    display: flex !important;
+    flex-direction: column;
+    gap: 3px;
+    margin: 0 !important;
+    font-size: 10px !important;
+    color: var(--text-muted);
+}
+
+.team-agent-inline-label select,
+.team-agent-inline-label input {
+    height: 28px;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    padding: 4px 6px;
 }
 
 .team-agent-edit-btn {

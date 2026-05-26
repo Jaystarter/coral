@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -186,10 +187,16 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 	// Export env vars so child processes (coral-board, hooks) inherit them.
 	// Single quotes prevent shell expansion; SanitizeShellValue strips metacharacters.
 	if params.SessionName != "" {
+		parts = append(parts, coralManagedCodexEnvReset()...)
+	}
+	if params.SessionName != "" {
 		parts = append(parts, fmt.Sprintf(`export CORAL_SESSION_NAME='%s' &&`, SanitizeShellValue(params.SessionName)))
 	}
 	if params.Role != "" {
 		parts = append(parts, fmt.Sprintf(`export CORAL_SUBSCRIBER_ID='%s' &&`, SanitizeShellValue(params.Role)))
+	}
+	if codexHome := prepareCoralManagedCodexHome(params); codexHome != "" {
+		parts = append(parts, fmt.Sprintf(`export CODEX_HOME=%s &&`, shellQuote(codexHome)))
 	}
 	// Route LLM traffic through the Coral MITM proxy for transparent cost tracking.
 	// HTTPS_PROXY must be exported BEFORE the binary (it's an env var, not a flag).
@@ -220,6 +227,8 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 	} else {
 		parts = append(parts, bin)
 	}
+
+	parts = append(parts, coralManagedCodexIsolationFlags(params)...)
 
 	// Codex -c flags for MITM proxy (must come AFTER the binary)
 	if params.ProxyBaseURL != "" {
@@ -255,13 +264,27 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 	// from ~/.coral/board_state_{session}.json when CORAL_SUBSCRIBER_ID is unavailable).
 
 	// Permission flags from capabilities
-	bypassSandbox := false
+	userBypassSandbox := false
+	for _, flag := range params.Flags {
+		if flag == "--dangerously-skip-permissions" || flag == "--full-auto" || flag == "--dangerously-bypass-approvals-and-sandbox" {
+			userBypassSandbox = true
+			break
+		}
+	}
+
+	bypassSandbox := userBypassSandbox
+	if userBypassSandbox {
+		parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+	}
 	if perms := TranslateToCodexPermissions(params.Capabilities); perms != nil {
-		if perms.BypassSandbox {
+		if userBypassSandbox {
+			// Team/user permission flags take precedence over per-agent capability
+			// defaults. Keep web search below, but do not add conflicting sandbox flags.
+		} else if perms.BypassSandbox {
 			bypassSandbox = true
 			parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
 		} else if perms.FullAuto {
-			parts = append(parts, "--full-auto")
+			parts = append(parts, "--sandbox", "workspace-write", "-a", "on-request")
 		} else {
 			if perms.SandboxMode != "" {
 				parts = append(parts, "--sandbox", perms.SandboxMode)
@@ -284,16 +307,18 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 	}
 	for i := 0; i < len(params.Flags); i++ {
 		flag := params.Flags[i]
-		if flag == "--dangerously-skip-permissions" {
-			// Translate to Codex equivalent, but skip if bypass was already added
+		if flag == "--dangerously-skip-permissions" || flag == "--full-auto" || flag == "--dangerously-bypass-approvals-and-sandbox" {
+			// Translate legacy/high-autonomy flags to the current Codex bypass flag.
 			if !bypassSandbox {
-				parts = append(parts, "--full-auto")
+				parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+				bypassSandbox = true
 			}
 			continue
 		}
-		// Drop --full-auto if --dangerously-bypass-approvals-and-sandbox already set;
-		// Codex rejects both flags together.
-		if flag == "--full-auto" && bypassSandbox {
+		if bypassSandbox && (flag == "--sandbox" || flag == "-a") {
+			if i+1 < len(params.Flags) {
+				i++
+			}
 			continue
 		}
 		if claudeOnlyFlags[flag] {
@@ -322,6 +347,297 @@ func (a *CodexAgent) BuildLaunchCommand(params LaunchParams) string {
 	}
 
 	return strings.Join(ShellQuoteParts(parts), " ")
+}
+
+// coralManagedCodexIsolationFlags prevents Coral-launched Codex agents from
+// inheriting user-global MCP/plugin startup. Failed MCP logins can suspend the
+// Codex TUI under zsh before Coral can deliver input to it.
+func coralManagedCodexIsolationFlags(params LaunchParams) []string {
+	if params.SessionName == "" {
+		return nil
+	}
+	flags := []string{"-c", "mcp_servers={}"}
+	for _, name := range configuredCodexMCPServerNames() {
+		if isCodexBareConfigKey(name) {
+			flags = append(flags, "-c", fmt.Sprintf("mcp_servers.%s.enabled=false", name))
+		}
+	}
+	for _, feature := range []string{
+		"apps",
+		"plugins",
+		"plugin_sharing",
+		"skill_mcp_dependency_install",
+		"tool_search",
+		"tool_suggest",
+		"tool_call_mcp_elicitation",
+		"browser_use",
+		"browser_use_external",
+		"in_app_browser",
+		"computer_use",
+		"image_generation",
+		"workspace_dependencies",
+		"multi_agent",
+		"hooks",
+		"plugin_hooks",
+		"external_migration",
+	} {
+		flags = append(flags, "--disable", feature)
+	}
+	return flags
+}
+
+func configuredCodexMCPServerNames() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		return nil
+	}
+	names := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		parts := tomlSectionPath(strings.TrimSpace(strings.Trim(line, "[]")))
+		if len(parts) >= 2 && parts[0] == "mcp_servers" {
+			names[parts[1]] = true
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func tomlSectionPath(section string) []string {
+	var parts []string
+	for i := 0; i < len(section); {
+		for i < len(section) && (section[i] == ' ' || section[i] == '\t' || section[i] == '.') {
+			i++
+		}
+		if i >= len(section) {
+			break
+		}
+		if section[i] == '"' {
+			i++
+			var b strings.Builder
+			for i < len(section) {
+				if section[i] == '\\' && i+1 < len(section) {
+					i++
+					b.WriteByte(section[i])
+					i++
+					continue
+				}
+				if section[i] == '"' {
+					i++
+					break
+				}
+				b.WriteByte(section[i])
+				i++
+			}
+			parts = append(parts, b.String())
+			continue
+		}
+		start := i
+		for i < len(section) && section[i] != '.' {
+			i++
+		}
+		if part := strings.TrimSpace(section[start:i]); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func isCodexBareConfigKey(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func coralManagedCodexEnvReset() []string {
+	return []string{
+		"unset CODEX_CI CODEX_SHELL CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_ROLLOUT_TRACE_ROOT CODEX_TUI_RECORD_SESSION CODEX_TUI_SESSION_LOG_PATH CODEX_EXEC_SERVER_REMOTE_BEARER_TOKEN CODEX_ESCALATE_SOCKET CODEX_NETWORK_PROXY_ACTIVE &&",
+	}
+}
+
+func prepareCoralManagedCodexHome(params LaunchParams) string {
+	if params.SessionName == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	coralDir := params.CoralDir
+	if coralDir == "" {
+		coralDir = filepath.Join(home, ".coral")
+	}
+	codexHome := filepath.Join(coralDir, "codex-home", coralManagedCodexHomeID(params))
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		slog.Warn("codex: failed to create Coral Codex home", "path", codexHome, "error", err)
+		return ""
+	}
+
+	userCodexHome := filepath.Join(home, ".codex")
+	config := filterCodexConfigForCoral(filepath.Join(userCodexHome, "config.toml"))
+	config = appendCoralCodexProjectTrust(config, params.WorkingDir)
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
+		slog.Warn("codex: failed to write Coral Codex config", "path", codexHome, "error", err)
+	}
+	linkOrCopyCodexFile(filepath.Join(userCodexHome, "auth.json"), filepath.Join(codexHome, "auth.json"))
+	linkCodexDir(filepath.Join(userCodexHome, "sessions"), filepath.Join(codexHome, "sessions"))
+	return codexHome
+}
+
+func coralManagedCodexHomeID(params LaunchParams) string {
+	id := params.SessionID
+	if id == "" {
+		id = params.SessionName
+	}
+	var b strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "session"
+	}
+	return b.String()
+}
+
+func appendCoralCodexProjectTrust(config, workingDir string) string {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		return config
+	}
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		workingDir = abs
+	}
+	section := fmt.Sprintf("[projects.%q]", filepath.Clean(workingDir))
+	if strings.Contains(config, section) {
+		return config
+	}
+	base := strings.TrimSpace(config)
+	trust := section + "\ntrust_level = \"trusted\"\n"
+	if base == "" {
+		return trust
+	}
+	return base + "\n\n" + trust
+}
+
+func filterCodexConfigForCoral(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return coralCodexFeatureConfig()
+	}
+	var out []string
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	skipSection := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			skipSection = shouldDropCoralCodexConfigSection(trimmed)
+			if skipSection {
+				continue
+			}
+		}
+		if skipSection {
+			continue
+		}
+		out = append(out, line)
+	}
+	base := strings.TrimSpace(strings.Join(out, "\n"))
+	if base != "" {
+		base += "\n\n"
+	}
+	return base + coralCodexFeatureConfig()
+}
+
+func shouldDropCoralCodexConfigSection(section string) bool {
+	return section == "[features]" ||
+		section == "[skills]" ||
+		section == "[mcp_servers]" ||
+		section == "[plugins]" ||
+		section == "[marketplaces]" ||
+		section == "[apps]" ||
+		strings.HasPrefix(section, "[mcp_servers.") ||
+		strings.HasPrefix(section, "[plugins.") ||
+		strings.HasPrefix(section, "[marketplaces.") ||
+		strings.HasPrefix(section, "[apps.") ||
+		strings.HasPrefix(section, "[skills.")
+}
+
+func coralCodexFeatureConfig() string {
+	return strings.TrimSpace(`
+[features]
+apps = false
+plugins = false
+plugin_sharing = false
+skill_mcp_dependency_install = false
+tool_search = false
+tool_suggest = false
+tool_call_mcp_elicitation = false
+browser_use = false
+browser_use_external = false
+in_app_browser = false
+computer_use = false
+image_generation = false
+workspace_dependencies = false
+multi_agent = false
+hooks = false
+plugin_hooks = false
+external_migration = false
+
+[skills]
+include_instructions = false
+`) + "\n"
+}
+
+func linkOrCopyCodexFile(src, dst string) {
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	_ = os.Remove(dst)
+	if err := os.Symlink(src, dst); err == nil {
+		return
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(dst, data, 0600); err != nil {
+		slog.Warn("codex: failed to copy file into Coral Codex home", "path", dst, "error", err)
+	}
+}
+
+func linkCodexDir(src, dst string) {
+	if info, err := os.Stat(src); err != nil || !info.IsDir() {
+		return
+	}
+	_ = os.Remove(dst)
+	if err := os.Symlink(src, dst); err != nil {
+		slog.Debug("codex: failed to symlink directory into Coral Codex home", "src", src, "dst", dst, "error", err)
+	}
 }
 
 // isCodexOAuthMode checks if the Codex CLI is configured to use ChatGPT OAuth

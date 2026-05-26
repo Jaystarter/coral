@@ -16,6 +16,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/cdknorow/coral/internal/board"
+	"github.com/cdknorow/coral/internal/naming"
 	"github.com/cdknorow/coral/internal/store"
 )
 
@@ -466,6 +467,9 @@ func (h *SessionsHandler) getActiveRuns(ctx context.Context) []map[string]any {
 // control messages (terminal_closed) remain JSON text frames.
 func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if agentType, sessionID := r.URL.Query().Get("agent_type"), r.URL.Query().Get("session_id"); agentType != "" && sessionID != "" {
+		name = naming.SessionName(agentType, sessionID)
+	}
 
 	if debugEnabled() {
 		slog.Info("[debug] ws/terminal connect", "name", name, "remote", r.RemoteAddr)
@@ -547,7 +551,9 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 			switch msg.Type {
 			case "terminal_input":
 				if msg.Data != "" {
-					h.backend.SendInput(name, []byte(msg.Data))
+					if err := h.backend.SendInput(name, []byte(msg.Data)); err != nil {
+						slog.Warn("ws/terminal input failed", "name", name, "error", err)
+					}
 				}
 			case "terminal_resize":
 				if msg.Cols >= 10 {
@@ -555,7 +561,9 @@ func (h *SessionsHandler) WSTerminal(w http.ResponseWriter, r *http.Request) {
 					if rows == 0 {
 						rows = 50
 					}
-					h.backend.Resize(name, uint16(msg.Cols), rows)
+					if err := h.backend.Resize(name, uint16(msg.Cols), rows); err != nil {
+						slog.Debug("ws/terminal resize failed", "name", name, "cols", msg.Cols, "rows", rows, "error", err)
+					}
 				}
 			}
 		}

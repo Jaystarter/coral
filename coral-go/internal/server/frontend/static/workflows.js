@@ -435,7 +435,7 @@ function renderRunDetail(run) {
         // Session link for agent steps
         let agentHtml = '';
         if (s.type === 'agent' && s.session_id) {
-            agentHtml = `<span class="wf-step-agent-link" onclick="event.stopPropagation(); selectLiveSession('${esc(s.session_name || s.session_id)}')">
+            agentHtml = `<span class="wf-step-agent-link" onclick="event.stopPropagation(); selectLiveSession('${escAttr(s.session_name || s.session_id)}', '${escAttr(s.agent_type || 'claude')}', '${escAttr(s.session_id)}')">
                 <span class="material-icons" style="font-size:13px">open_in_new</span> View agent
             </span>`;
         }

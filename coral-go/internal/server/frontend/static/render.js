@@ -626,15 +626,31 @@ async function _sendBoardChat(boardName) {
     if (!inputEl) return;
     const content = inputEl.value.trim();
     if (!content) return;
-    inputEl.value = '';
+    const previousValue = inputEl.value;
+    inputEl.disabled = true;
     try {
-        await fetch(`/api/board/${encodeURIComponent(boardName)}/messages`, {
+        const resp = await fetch(`/api/board/${encodeURIComponent(boardName)}/messages`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: 'dashboard', content }),
+            body: JSON.stringify({ subscriber_id: 'dashboard', session_id: 'dashboard', as: 'Operator', content }),
         });
-        _loadBoardPanelChat(boardName);
-    } catch { /* ignore */ }
+        const result = await resp.json().catch(() => ({}));
+        if (!resp.ok || result.error) {
+            showToast(result.error || `Failed to send message (${resp.status})`, true);
+            inputEl.value = previousValue;
+            return;
+        }
+        inputEl.value = '';
+        _boardChatTotal = 0;
+        await _loadBoardPanelChat(boardName);
+    } catch (e) {
+        showToast("Failed to send message", true);
+        inputEl.value = previousValue;
+        console.error("Board chat send failed:", e);
+    } finally {
+        inputEl.disabled = false;
+        inputEl.focus();
+    }
 }
 window._sendBoardChat = _sendBoardChat;
 

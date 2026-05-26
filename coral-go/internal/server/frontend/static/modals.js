@@ -83,6 +83,84 @@ function _invalidateDefaultModels() {
 }
 window._invalidateDefaultModels = _invalidateDefaultModels;
 
+const AGENT_TYPE_CHOICES = [
+    { value: 'codex', label: 'Codex' },
+    { value: 'claude', label: 'Claude' },
+    { value: 'gemini', label: 'Gemini' },
+    { value: 'pi', label: 'Pi' },
+    { value: 'terminal', label: 'Terminal' },
+];
+
+function _defaultAgentType() {
+    const configured = (state.settings && state.settings.default_agent_type || '').trim();
+    return configured || 'codex';
+}
+
+function _agentTypeOptionsHTML(selected, includeTerminal = true) {
+    const selectedType = selected || _defaultAgentType();
+    return AGENT_TYPE_CHOICES
+        .filter(t => includeTerminal || t.value !== 'terminal')
+        .map(t => `<option value="${escapeAttr(t.value)}"${selectedType === t.value ? ' selected' : ''}>${escapeHtml(t.label)}</option>`)
+        .join('');
+}
+
+function _agentTypeLabel(agentType) {
+    return AGENT_TYPE_CHOICES.find(t => t.value === agentType)?.label || getEngineName(agentType || _defaultAgentType());
+}
+
+function _getTeamDefaultAgentType() {
+    const teamType = document.getElementById('team-agent-type')?.value;
+    return teamType || _defaultAgentType();
+}
+
+function _getTeamDefaultModel() {
+    const agentType = _getTeamDefaultAgentType();
+    if (agentType === 'terminal') return '';
+    return document.getElementById('team-agent-model')?.value.trim() || '';
+}
+
+function _bindTeamDefaultControls() {
+    const typeSelect = document.getElementById('team-agent-type');
+    if (typeSelect && !typeSelect.dataset.bound) {
+        typeSelect.dataset.bound = 'true';
+        typeSelect.addEventListener('change', () => _syncTeamAgentDefaults(true));
+    }
+    const modelInput = document.getElementById('team-agent-model');
+    if (modelInput && !modelInput.dataset.bound) {
+        modelInput.dataset.bound = 'true';
+        modelInput.addEventListener('input', (e) => {
+            if (e.isTrusted) modelInput.dataset.dirty = 'true';
+        });
+    }
+}
+
+async function _syncTeamAgentDefaults(refillModel = false) {
+    const typeSelect = document.getElementById('team-agent-type');
+    const modelInput = document.getElementById('team-agent-model');
+    const modelWrap = document.querySelector('.team-agent-model-wrap');
+    const datalist = document.getElementById('team-agent-models');
+    const agentType = typeSelect?.value || _defaultAgentType();
+
+    if (datalist) {
+        _getAgentModels().then(models => _fillModelDatalist(datalist, agentType, models));
+    }
+    if (modelWrap) modelWrap.style.display = agentType === 'terminal' ? 'none' : '';
+    if (!modelInput) return;
+
+    if (agentType === 'terminal') {
+        modelInput.value = '';
+        modelInput.dataset.dirty = 'false';
+        return;
+    }
+    if (!refillModel && modelInput.dataset.dirty === 'true') return;
+
+    const defaults = await _getDefaultModels();
+    if ((typeSelect?.value || _defaultAgentType()) !== agentType) return;
+    modelInput.value = defaults[agentType] || '';
+    modelInput.dataset.dirty = 'false';
+}
+window._syncTeamAgentDefaults = _syncTeamAgentDefaults;
+
 function _syncMobileLaunchSections(step) {
     const isMobile = window.innerWidth <= 767;
     const root = step ? document.getElementById(`launch-step-${step}`) : document.getElementById("launch-modal");
@@ -156,6 +234,15 @@ export function showLaunchModal() {
         teamPermModeEl.value = (state.settings && state.settings.default_permission_mode) || 'bypassPermissions';
         _updatePermModeDescription(teamPermModeEl);
     }
+    const teamTypeSelect = document.getElementById("team-agent-type");
+    if (teamTypeSelect) teamTypeSelect.value = _defaultAgentType();
+    const teamModelInput = document.getElementById("team-agent-model");
+    if (teamModelInput) {
+        teamModelInput.value = "";
+        teamModelInput.dataset.dirty = "false";
+    }
+    _bindTeamDefaultControls();
+    _syncTeamAgentDefaults(true);
 
     // Pre-fill from global settings
     const s = state.settings || {};
@@ -166,9 +253,7 @@ export function showLaunchModal() {
         if (termDirInput) termDirInput.value = s.default_working_dir;
     }
     const typeSelect = document.getElementById("launch-type");
-    if (s.default_agent_type && typeSelect) {
-        typeSelect.value = s.default_agent_type;
-    }
+    if (typeSelect) typeSelect.value = _defaultAgentType();
 
     _syncMobileLaunchSections();
 }
@@ -262,14 +347,14 @@ function _normalizeGeneratedTeamPayload(payload) {
     };
 }
 
-function _populateGeneratedTeamDraft(team) {
+async function _populateGeneratedTeamDraft(team) {
     _skipDefaultTeamAgents = true;
     // Open the launch modal directly to the team step, skipping the chooser.
     // Don't call showLaunchModal() — it resets to the chooser and clears the agent list.
     document.getElementById("launch-modal").style.display = "flex";
     _showLaunchStep("team");
     _launchMode = "team";
-    _initTeamForm();
+    await _initTeamForm();
 
     // Show generated-team banner
     const stepEl = document.getElementById('launch-step-team');
@@ -306,7 +391,7 @@ function _populateGeneratedTeamDraft(team) {
             agent.name || '',
             agent.prompt || '',
             agent.capabilities,
-            agent.agent_type,
+            agent.agent_type || _getTeamDefaultAgentType(),
             agent.model,
         );
     }
@@ -477,9 +562,9 @@ async function testTeamWizard() {
         name: 'test-coding-team',
         flags: '',
         agents: [
-            { name: 'Orchestrator', prompt: 'You are the orchestrator. Break down the task, assign work to the team via the message board, and track progress.', capabilities: { allow: ['file_read', 'file_write', 'shell', 'git_write', 'agent_spawn', 'web_access'], deny: [] }, agent_type: 'claude', model: '' },
-            { name: 'Developer', prompt: 'You are a developer. Implement features, write code, and fix bugs. Wait for instructions from the Orchestrator.', capabilities: { allow: ['file_read', 'file_write', 'shell'], deny: [] }, agent_type: 'claude', model: '' },
-            { name: 'QA Engineer', prompt: 'You are a QA engineer. Review code, write tests, and verify work. Wait for instructions from the Orchestrator.', capabilities: { allow: ['file_read', 'file_write', 'shell'], deny: [] }, agent_type: 'claude', model: '' },
+            { name: 'Orchestrator', prompt: 'You are the orchestrator. Break down the task, assign work to the team via the message board, and track progress.', capabilities: { allow: ['file_read', 'file_write', 'shell', 'git_write', 'agent_spawn', 'web_access'], deny: [] }, agent_type: _defaultAgentType(), model: '' },
+            { name: 'Developer', prompt: 'You are a developer. Implement features, write code, and fix bugs. Wait for instructions from the Orchestrator.', capabilities: { allow: ['file_read', 'file_write', 'shell'], deny: [] }, agent_type: _defaultAgentType(), model: '' },
+            { name: 'QA Engineer', prompt: 'You are a QA engineer. Review code, write tests, and verify work. Wait for instructions from the Orchestrator.', capabilities: { allow: ['file_read', 'file_write', 'shell'], deny: [] }, agent_type: _defaultAgentType(), model: '' },
         ],
     };
 
@@ -509,16 +594,22 @@ function _updateTeamAgentSummary(row) {
     const promptPreview = _truncatePrompt(config.prompt || '', 200);
     const nameEl = row.querySelector('.team-agent-role-name');
     const previewEl = row.querySelector('.team-agent-prompt-preview');
+    const metaEl = row.querySelector('.team-agent-type-model-summary');
     if (nameEl) nameEl.textContent = name;
     if (previewEl) previewEl.textContent = promptPreview || 'No behavior prompt yet.';
+    if (metaEl) {
+        const agentType = config.agentType || _getTeamDefaultAgentType();
+        const model = config.model || 'default model';
+        metaEl.textContent = `${_agentTypeLabel(agentType)} - ${model}`;
+    }
 }
 
 function _defaultTeamAgentModalConfig() {
     return {
         name: '',
         prompt: '',
-        agentType: document.getElementById('team-agent-type')?.value || '',
-        model: '',
+        agentType: _getTeamDefaultAgentType(),
+        model: _getTeamDefaultModel(),
         capabilities: null,
     };
 }
@@ -558,6 +649,7 @@ function saveTeamAgentFromModal() {
     if (_teamAgentModalRow?.dataset.acfId) {
         setAgentConfig(_teamAgentModalRow.dataset.acfId, config);
         _updateTeamAgentSummary(_teamAgentModalRow);
+        _syncTeamAgentInlineControls(_teamAgentModalRow);
     } else {
         _addTeamAgent(config.name, config.prompt, config.capabilities, config.agentType, config.model);
     }
@@ -604,7 +696,7 @@ window._checkAgentCLI = _checkAgentCLI;
 /** Map agent type to its permission bypass flag. */
 const PERM_FLAGS = {
     claude: '--dangerously-skip-permissions',
-    codex: '--full-auto',
+    codex: '--dangerously-bypass-approvals-and-sandbox',
     gemini: '--yolo',
     pi: '',
 };
@@ -645,7 +737,7 @@ function _stripPermFlags(flagsStr) {
 
 function _getPermFlagHelp(agentType) {
     const flag = _getPermFlagForAgent(agentType);
-    const agentLabel = getEngineName(agentType || 'claude');
+    const agentLabel = getEngineName(agentType || _defaultAgentType());
     if (agentType === 'pi') {
         return `${agentLabel} runs full-auto by design — no permission flag needed.`;
     }
@@ -653,21 +745,23 @@ function _getPermFlagHelp(agentType) {
         const mode = (state.settings && state.settings.default_permission_mode) || 'bypassPermissions';
         return `High-autonomy launch for ${agentLabel}. Coral adds --permission-mode ${mode} so the agent can run without interactive permission prompts.`;
     }
+    if (agentType === 'codex') {
+        return `High-autonomy launch for ${agentLabel}. Coral adds --dangerously-bypass-approvals-and-sandbox so Codex can run without interactive permission prompts.`;
+    }
     return `High-autonomy launch for ${agentLabel}. Coral adds ${flag} so the agent can run without interactive permission prompts.`;
 }
 
 /** Update permission flag shortcut buttons in the same modal as the agent type select. */
 function _updatePermFlagButtons(selectEl) {
-    const agentType = selectEl.value || 'claude';
+    const agentType = selectEl.value || _defaultAgentType();
     const flag = _getPermFlagForAgent(agentType);
 
-    // Find the enclosing modal content and update all flag-shortcut-btn that reference skip-permissions/full-auto
+    // Find the enclosing modal content and update all flag-shortcut-btn that reference permission bypass flags.
     const modal = selectEl.closest('.modal-content') || selectEl.closest('.modal');
     if (!modal) return;
 
     modal.querySelectorAll('.flag-shortcut-btn').forEach(btn => {
         const onclick = btn.getAttribute('onclick') || '';
-        // Match buttons that toggle a dangerously- or --full-auto flag
         if (onclick.includes('dangerously-') || onclick.includes('full-auto')) {
             // Extract the flag input ID from the onclick
             const match = onclick.match(/toggleFlag\('([^']+)'/);
@@ -697,7 +791,7 @@ window._updatePermModeDescription = _updatePermModeDescription;
 /** Get the permission flag for a given agent type select element ID. */
 function _getPermFlag(selectId) {
     const el = document.getElementById(selectId);
-    const agentType = el ? el.value : 'claude';
+    const agentType = el ? el.value : _defaultAgentType();
     return _getPermFlagForAgent(agentType);
 }
 
@@ -714,7 +808,7 @@ function _syncACFAutoPermissions(container) {
     const flagEl = container.querySelector('.acf-auto-permissions-flag');
     if (!typeEl || !toggleEl || !noteEl || !flagEl) return;
 
-    const agentType = typeEl.value || 'claude';
+    const agentType = typeEl.value || _defaultAgentType();
     const flag = _getPermFlagForAgent(agentType);
     flagEl.textContent = flag;
     noteEl.textContent = _getPermFlagHelp(agentType);
@@ -900,7 +994,7 @@ export async function launchSession() {
     } else {
         dir = document.getElementById("launch-dir").value.trim();
         const config = getAgentConfig('launch-agent-acf');
-        type = config.agentType || 'claude';
+        type = config.agentType || _defaultAgentType();
         agentName = document.getElementById("launch-agent-name-input")?.value.trim() || config.name;
         flagsStr = config.flags;
         backend = document.getElementById("launch-backend")?.value;
@@ -1345,8 +1439,7 @@ export async function launchTerminalToBoard(boardName, workDir) {
 // ── Standalone Agent Launch (no board) ────────────────────────────────────
 
 export async function launchDefaultAgent(workDir) {
-    const s = state.settings || {};
-    const agentType = s.default_agent_type || 'claude';
+    const agentType = _defaultAgentType();
     const permFlag = _getPermFlagForAgent(agentType);
     const flags = permFlag ? permFlag.split(/\s+/) : [];
 
@@ -1625,7 +1718,7 @@ function renderAgentConfigForm(containerId, opts = {}) {
     const showAutoPermissions = opts.showAutoPermissions !== false;
     const v = opts.value || {};
 
-    const agentTypeVal = v.agentType || v.agent_type || '';
+    const agentTypeVal = v.agentType || v.agent_type || _defaultAgentType();
     const modelVal = v.model || '';
     const nameVal = v.name || '';
     const promptVal = v.prompt || '';
@@ -1682,11 +1775,7 @@ function renderAgentConfigForm(containerId, opts = {}) {
         <div class="acf-top-row">
             <label>Agent Type:
                 <select class="acf-agent-type" onchange="window._checkAgentCLI && window._checkAgentCLI(this.value)">
-                    <option value="claude"${agentTypeVal === 'claude' || !agentTypeVal ? ' selected' : ''}>Claude</option>
-                    <option value="gemini"${agentTypeVal === 'gemini' ? ' selected' : ''}>Gemini</option>
-                    <option value="codex"${agentTypeVal === 'codex' ? ' selected' : ''}>Codex</option>
-                    <option value="pi"${agentTypeVal === 'pi' ? ' selected' : ''}>Pi</option>
-                    <option value="terminal"${agentTypeVal === 'terminal' ? ' selected' : ''}>Terminal</option>
+                    ${_agentTypeOptionsHTML(agentTypeVal, true)}
                 </select>
             </label>
             <label class="acf-model-wrap">Model <span style="color:var(--text-muted);font-weight:normal">(optional)</span>:
@@ -1771,7 +1860,7 @@ function _syncACFModelField(container) {
     const modelWrap = container.querySelector('.acf-model-wrap');
     const modelInput = container.querySelector('.acf-model');
     const datalist = container.querySelector('datalist[id^="acf-models-"]');
-    const agentType = typeSel?.value || 'claude';
+    const agentType = typeSel?.value || _defaultAgentType();
     if (modelWrap) {
         modelWrap.style.display = (agentType === 'terminal') ? 'none' : '';
     }
@@ -1788,7 +1877,7 @@ function _syncACFModelField(container) {
         // If the user started typing during the fetch, don't clobber their input.
         if (container.dataset.acfModelDirty === 'true') return;
         // Re-check the agent type — the user may have switched again mid-fetch.
-        const currentType = typeSel?.value || 'claude';
+        const currentType = typeSel?.value || _defaultAgentType();
         if (currentType === 'terminal') {
             modelInput.value = '';
             return;
@@ -1807,7 +1896,7 @@ function getAgentConfig(containerId) {
     const container = document.getElementById(containerId);
     if (!container) return {};
     const uid = container.dataset.acfUid;
-    const agentType = container.querySelector('.acf-agent-type')?.value || 'claude';
+    const agentType = container.querySelector('.acf-agent-type')?.value || _defaultAgentType();
     const permMode = container.querySelector('.acf-permission-mode')?.value || 'default';
     let flags = _stripPermFlags(container.querySelector('.acf-flags')?.value.trim() || '');
     if (permMode && permMode !== 'default') {
@@ -1846,7 +1935,7 @@ function setAgentConfig(containerId, values) {
     const nameEl = container.querySelector('.acf-name');
     if (nameEl) nameEl.value = v.name || '';
     const typeEl = container.querySelector('.acf-agent-type');
-    if (typeEl) typeEl.value = v.agentType || v.agent_type || 'claude';
+    if (typeEl) typeEl.value = v.agentType || v.agent_type || _defaultAgentType();
     const modelEl = container.querySelector('.acf-model');
     if (modelEl) {
         modelEl.value = v.model || '';
@@ -1945,7 +2034,9 @@ async function _initTeamForm() {
         checkGitDir(); // initial check
     }
     const typeSelect = document.getElementById("team-agent-type");
-    if (s.default_agent_type && typeSelect) typeSelect.value = s.default_agent_type;
+    if (typeSelect) typeSelect.value = _defaultAgentType();
+    _bindTeamDefaultControls();
+    await _syncTeamAgentDefaults(true);
 
     // Fetch existing boards for uniqueness validation
     try {
@@ -2068,7 +2159,7 @@ window._quickLaunchTeam = async function() {
     const launchBtn = document.querySelector('#quick-launch-modal .btn-primary');
     if (launchBtn) { launchBtn.disabled = true; launchBtn.textContent = 'Launching...'; }
 
-    const agentType = 'claude';
+    const agentType = _defaultAgentType();
     const permFlag = _getPermFlagForAgent(agentType);
 
     try {
@@ -2210,6 +2301,63 @@ function _truncatePrompt(text, maxLen) {
     return text.substring(0, maxLen) + "\u2026";
 }
 
+function _syncTeamAgentInlineControls(row, fromInline = false, source = '') {
+	if (!row) return;
+	const acfId = row.dataset.acfId;
+	const container = acfId ? document.getElementById(acfId) : null;
+	const typeSelect = row.querySelector('.team-agent-inline-type');
+	const modelInput = row.querySelector('.team-agent-inline-model');
+    const modelWrap = row.querySelector('.team-agent-inline-model-wrap');
+    const datalist = row.querySelector('datalist[id^="team-agent-models-"]');
+
+    if (!typeSelect || !modelInput) return;
+
+    if (!fromInline && container) {
+        const config = getAgentConfig(acfId);
+        typeSelect.value = config.agentType || _getTeamDefaultAgentType();
+		modelInput.value = config.model || '';
+	}
+
+	const agentType = typeSelect.value || _getTeamDefaultAgentType();
+	const typeChangedInline = fromInline && source === 'type';
+	if (typeChangedInline) {
+		modelInput.value = '';
+		if (container) container.dataset.acfModelDirty = 'false';
+	}
+	let model = agentType === 'terminal' ? '' : modelInput.value.trim();
+	if (agentType === 'terminal') {
+		modelInput.value = '';
+		model = '';
+	}
+	if (modelWrap) modelWrap.style.display = agentType === 'terminal' ? 'none' : '';
+	if (datalist) {
+		_getAgentModels().then(models => _fillModelDatalist(datalist, agentType, models));
+	}
+
+    if (fromInline && container) {
+        const nameEl = container.querySelector('.acf-name');
+        const typeEl = container.querySelector('.acf-agent-type');
+		const modelEl = container.querySelector('.acf-model');
+		if (typeEl) typeEl.value = agentType;
+		if (modelEl) modelEl.value = model;
+		container.dataset.acfModelDirty = source === 'model' ? 'true' : 'false';
+		_syncACFAutoPermissions(container);
+		_syncACFModelField(container);
+		if (nameEl) nameEl.dispatchEvent(new Event('input', { bubbles: true }));
+		_updateTeamAgentSummary(row);
+		if (typeChangedInline && agentType !== 'terminal') {
+			_getDefaultModels().then(defaults => {
+				if (typeSelect.value !== agentType || container.dataset.acfModelDirty === 'true') return;
+				const defaultModel = defaults[agentType] || '';
+				modelInput.value = defaultModel;
+				if (modelEl) modelEl.value = defaultModel;
+				_updateTeamAgentSummary(row);
+			});
+		}
+	}
+}
+window._syncTeamAgentInlineControls = _syncTeamAgentInlineControls;
+
 function _addTeamAgent(defaultName, defaultPrompt, defaultCapabilities, defaultAgentType, defaultModel) {
     _teamAgentCounter++;
     const idx = _teamAgentCounter;
@@ -2221,12 +2369,29 @@ function _addTeamAgent(defaultName, defaultPrompt, defaultCapabilities, defaultA
     row.dataset.idx = idx;
     row.dataset.acfId = acfId;
 
+    const resolvedAgentType = defaultAgentType || _getTeamDefaultAgentType();
+    const resolvedModel = resolvedAgentType === 'terminal'
+        ? ''
+        : (defaultModel || (resolvedAgentType === _getTeamDefaultAgentType() ? _getTeamDefaultModel() : ''));
+
     row.innerHTML = `
         <div class="team-agent-card">
             <div class="team-agent-summary" onclick="window.showTeamAgentModal(this.closest('.team-agent-row'))">
                 <div class="team-agent-summary-left">
                     <span class="team-agent-role-name">${escapeHtml(defaultName || 'New Agent')}</span>
+                    <span class="team-agent-type-model-summary"></span>
                     <span class="team-agent-prompt-preview">${escapeHtml(_truncatePrompt(defaultPrompt, 200) || 'No behavior prompt yet.')}</span>
+                </div>
+                <div class="team-agent-inline-controls" onclick="event.stopPropagation()">
+                    <label class="team-agent-inline-label">Type
+						<select class="team-agent-inline-type" onchange="window._syncTeamAgentInlineControls(this.closest('.team-agent-row'), true, 'type')">
+							${_agentTypeOptionsHTML(resolvedAgentType, true)}
+						</select>
+					</label>
+					<label class="team-agent-inline-label team-agent-inline-model-wrap">Model
+						<input type="text" class="team-agent-inline-model" list="team-agent-models-${idx}" placeholder="Default" autocomplete="off" value="${escapeAttr(resolvedModel)}" oninput="window._syncTeamAgentInlineControls(this.closest('.team-agent-row'), true, 'model')" onchange="window._syncTeamAgentInlineControls(this.closest('.team-agent-row'), true, 'model')">
+						<datalist id="team-agent-models-${idx}"></datalist>
+					</label>
                 </div>
                 <div class="team-agent-summary-actions">
                     <button class="team-agent-reorder-btn" title="Move up" onclick="event.stopPropagation(); window._moveTeamAgent(this, -1)">
@@ -2257,12 +2422,13 @@ function _addTeamAgent(defaultName, defaultPrompt, defaultCapabilities, defaultA
         value: {
             name: defaultName || '',
             prompt: defaultPrompt || '',
-            agentType: defaultAgentType || '',
-            model: defaultModel || '',
+            agentType: resolvedAgentType,
+            model: resolvedModel,
             capabilities: caps,
         },
     });
 
+    _syncTeamAgentInlineControls(row);
     _updateTeamAgentSummary(row);
 
     // Drag-and-drop reorder handlers
@@ -2322,8 +2488,8 @@ function _showAddAgentPicker() {
 
     // Get names of agents already added
     const existingNames = new Set();
-    document.querySelectorAll("#team-agents-list .team-agent-name").forEach(input => {
-        const n = input.value.trim().toLowerCase();
+    document.querySelectorAll("#team-agents-list .team-agent-row").forEach(row => {
+        const n = (row.dataset.acfId ? getAgentConfig(row.dataset.acfId).name : '').trim().toLowerCase();
         if (n) existingNames.add(n);
     });
 
@@ -2658,7 +2824,7 @@ export async function showResumeModal() {
 
     const sessionId = state.currentSession.name;
     const historyEntry = state.historySessionsList.find(s => s.session_id === sessionId);
-    let agentType = (historyEntry && historyEntry.source_type) || "claude";
+    let agentType = (historyEntry && historyEntry.source_type) || _defaultAgentType();
 
     const dirInput = document.getElementById("resume-dir");
     const boardRow = document.getElementById("resume-board-row");
@@ -2720,7 +2886,7 @@ export async function resumeLaunchNew() {
     }
 
     const modal = document.getElementById("resume-modal");
-    const agentType = modal.dataset.agentType || "claude";
+    const agentType = modal.dataset.agentType || _defaultAgentType();
     const displayName = modal.dataset.displayName || "";
     const boardCheck = document.getElementById("resume-board-check");
     const boardNameEl = document.getElementById("resume-board-name");
@@ -3003,7 +3169,7 @@ export async function showSettingsModal() {
     document.getElementById("settings-renderer-select").innerHTML = options;
 
     // Default Agent Type
-    const currentAgentType = s.default_agent_type || "claude";
+    const currentAgentType = _defaultAgentType();
     const agentTypeSelect = document.getElementById("settings-agent-type");
     if (agentTypeSelect) agentTypeSelect.value = currentAgentType;
 
@@ -3226,7 +3392,7 @@ export function hideSettingsModal() {
 export async function applySettings() {
     const themeValue = document.getElementById("settings-theme")?.value || "dark";
     const engineName = document.getElementById("settings-renderer-select").value;
-    const agentType = document.getElementById("settings-agent-type")?.value || "claude";
+    const agentType = document.getElementById("settings-agent-type")?.value || _defaultAgentType();
     const permissionMode = document.getElementById("settings-permission-mode")?.value || "bypassPermissions";
     const workingDir = document.getElementById("settings-working-dir")?.value.trim() || "";
     const cliPathClaude = document.getElementById("settings-cli-path-claude")?.value.trim() || "";

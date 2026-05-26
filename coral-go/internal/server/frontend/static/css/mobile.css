@@ -719,6 +719,15 @@
         min-width: 0 !important;
     }
 
+    .team-launch-defaults,
+    .team-agent-inline-controls {
+        grid-template-columns: 1fr;
+    }
+
+    .team-agent-summary {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
     /* Toolbar wrapping */
     .command-toolbar {
         flex-wrap: wrap;

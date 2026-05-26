@@ -46,6 +46,11 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o "
 echo "==> Compiling coral-board"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o "$BUILD_DIR/coral-board" ./cmd/coral-board/
 
+for hook in coral-hook-agentic-state coral-hook-task-sync coral-hook-message-check coral-hook-session-start; do
+    echo "==> Compiling $hook"
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $BUILD_TAGS -ldflags="-s -w" -o "$BUILD_DIR/$hook" "./cmd/$hook/"
+done
+
 echo "==> Creating tarball"
 cd "$DIST_DIR"
 TARBALL="coral-linux-amd64-${VERSION}.tar.gz"

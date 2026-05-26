@@ -7,8 +7,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -441,7 +441,22 @@ func (c *Client) HasSession(ctx context.Context, name string) bool {
 // It automatically disables bracketed paste mode to prevent '00~' characters
 // from being prepended to commands sent via send-keys.
 func (c *Client) NewSession(ctx context.Context, name, workDir string) error {
-	_, err := c.run(ctx, "new-session", "-d", "-s", name, "-c", workDir)
+	return c.NewSessionWithCommand(ctx, name, workDir, "")
+}
+
+// NewSessionWithCommand creates a new detached tmux session and optionally
+// starts the pane with shell-command directly. Passing the agent launch command
+// here avoids typing it into an interactive shell with send-keys, which can
+// leave full-screen CLIs in a stopped background job after their first response.
+func (c *Client) NewSessionWithCommand(ctx context.Context, name, workDir, command string) error {
+	args := []string{"new-session", "-d", "-s", name}
+	if workDir != "" {
+		args = append(args, "-c", workDir)
+	}
+	if command != "" {
+		args = append(args, command)
+	}
+	_, err := c.run(ctx, args...)
 	if err != nil {
 		return err
 	}
@@ -475,9 +490,18 @@ func (c *Client) RenameSession(ctx context.Context, oldName, newName string) err
 
 // RespawnPane kills the running process in a pane and spawns a fresh shell.
 func (c *Client) RespawnPane(ctx context.Context, target, workDir string) error {
+	return c.RespawnPaneWithCommand(ctx, target, workDir, "")
+}
+
+// RespawnPaneWithCommand kills the running process in a pane and optionally
+// starts a replacement shell-command directly.
+func (c *Client) RespawnPaneWithCommand(ctx context.Context, target, workDir, command string) error {
 	args := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
+	}
+	if command != "" {
+		args = append(args, command)
 	}
 	_, err := c.run(ctx, args...)
 	return err
@@ -488,7 +512,6 @@ func (c *Client) ClearHistory(ctx context.Context, target string) error {
 	_, err := c.run(ctx, "clear-history", "-t", target)
 	return err
 }
-
 
 // SendTerminalInputToTarget sends raw terminal input data to a resolved tmux target.
 // Handles control characters, escape sequences, and multi-line text.
@@ -625,4 +648,3 @@ func sessionFromTarget(target string) string {
 	}
 	return target
 }
-

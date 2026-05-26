@@ -21,10 +21,6 @@ func startPTYProcess(name string, args []string, dir string, env []string, cols,
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-		Pgid:    0,
-	}
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 	if err != nil {
@@ -48,7 +44,7 @@ func startPTYProcess(name string, args []string, dir string, env []string, cols,
 func (p *unixPTY) Read(b []byte) (int, error)  { return p.ptyFile.Read(b) }
 func (p *unixPTY) Write(b []byte) (int, error) { return p.ptyFile.Write(b) }
 func (p *unixPTY) Close() error                { return p.ptyFile.Close() }
-func (p *unixPTY) Done() <-chan struct{}        { return p.done }
+func (p *unixPTY) Done() <-chan struct{}       { return p.done }
 
 func (p *unixPTY) Resize(cols, rows uint16) error {
 	return pty.Setsize(p.ptyFile, &pty.Winsize{Rows: rows, Cols: cols})
